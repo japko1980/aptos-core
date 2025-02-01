@@ -7,6 +7,7 @@ use crate::{
     diagnostics::FilesSourceText,
     shared::NumericalAddress,
 };
+use move_binary_format::CompiledModule;
 use move_core_types::{
     account_address::AccountAddress, identifier::Identifier, language_storage::ModuleId,
     value::MoveValue, vm_status::StatusCode,
@@ -19,10 +20,20 @@ pub mod plan_builder;
 pub type TestName = String;
 
 #[derive(Debug, Clone)]
+pub enum NamedOrBytecodeModule {
+    // Compiled from source
+    Named(NamedCompiledModule),
+    // Bytecode dependency
+    Bytecode(CompiledModule),
+}
+
+#[derive(Debug, Clone)]
 pub struct TestPlan {
     pub files: FilesSourceText,
     pub module_tests: BTreeMap<ModuleId, ModuleTestPlan>,
-    pub module_info: BTreeMap<ModuleId, NamedCompiledModule>,
+    // `NamedCompiledModule` for compiled modules with source,
+    // `CompiledModule` for modules with bytecode only
+    pub module_info: BTreeMap<ModuleId, NamedOrBytecodeModule>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,12 +59,19 @@ pub enum ExpectedFailure {
     ExpectedWithError(ExpectedMoveError),
 }
 
-#[derive(Debug, Clone, Ord, PartialOrd, PartialEq, Eq)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq)]
 pub struct ExpectedMoveError(
     pub StatusCode,
     pub Option<u64>,
     pub move_binary_format::errors::Location,
+    pub Option<String>,
 );
+
+impl PartialEq for ExpectedMoveError {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0 && self.1 == other.1 && self.2 == other.2
+    }
+}
 
 pub struct ExpectedMoveErrorDisplay<'a> {
     error: &'a ExpectedMoveError,
@@ -78,6 +96,7 @@ impl TestPlan {
         tests: Vec<ModuleTestPlan>,
         files: FilesSourceText,
         units: Vec<AnnotatedCompiledUnit>,
+        bytecode_modules: Vec<CompiledModule>,
     ) -> Self {
         let module_tests: BTreeMap<_, _> = tests
             .into_iter()
@@ -90,12 +109,17 @@ impl TestPlan {
                 if let AnnotatedCompiledUnit::Module(annot_module) = unit {
                     Some((
                         annot_module.named_module.module.self_id(),
-                        annot_module.named_module,
+                        NamedOrBytecodeModule::Named(annot_module.named_module),
                     ))
                 } else {
                     None
                 }
             })
+            .chain(
+                bytecode_modules
+                    .into_iter()
+                    .map(|module| (module.self_id(), NamedOrBytecodeModule::Bytecode(module))),
+            )
             .collect();
 
         Self {
@@ -119,7 +143,7 @@ impl<'a> fmt::Display for ExpectedMoveErrorDisplay<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use move_binary_format::errors::Location;
         let Self {
-            error: ExpectedMoveError(status, sub_status, location),
+            error: ExpectedMoveError(status, sub_status, location, msg),
             is_past_tense,
         } = self;
         let status_val: u64 = (*status).into();
@@ -147,6 +171,11 @@ impl<'a> fmt::Display for ExpectedMoveErrorDisplay<'a> {
         } else if let Some(code) = sub_status {
             write!(f, " with sub-status {code}")?
         };
+        if let Some(msg) = msg {
+            if status != &StatusCode::ABORTED {
+                write!(f, " with error message: \"{}\". Error", msg)?;
+            }
+        }
         if status != &StatusCode::OUT_OF_GAS {
             write!(f, " originating")?;
         }

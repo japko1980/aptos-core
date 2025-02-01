@@ -289,8 +289,40 @@ module aptos_token::token {
         amount: u64,
     }
 
+    #[event]
+    /// Set of data sent to the event stream during a receive
+    struct TokenDeposit has drop, store {
+        account: address,
+        id: TokenId,
+        amount: u64,
+    }
+
+    #[deprecated]
+    #[event]
+    /// Set of data sent to the event stream during a receive
+    struct Deposit has drop, store {
+        id: TokenId,
+        amount: u64,
+    }
+
     /// Set of data sent to the event stream during a withdrawal
     struct WithdrawEvent has drop, store {
+        id: TokenId,
+        amount: u64,
+    }
+
+    #[deprecated]
+    #[event]
+    /// Set of data sent to the event stream during a withdrawal
+    struct Withdraw has drop, store {
+        id: TokenId,
+        amount: u64,
+    }
+
+    #[event]
+    /// Set of data sent to the event stream during a withdrawal
+    struct TokenWithdraw has drop, store {
+        account: address,
         id: TokenId,
         amount: u64,
     }
@@ -311,8 +343,56 @@ module aptos_token::token {
         property_types: vector<String>,
     }
 
+    #[deprecated]
+    #[event]
+    struct CreateTokenData has drop, store {
+        id: TokenDataId,
+        description: String,
+        maximum: u64,
+        uri: String,
+        royalty_payee_address: address,
+        royalty_points_denominator: u64,
+        royalty_points_numerator: u64,
+        name: String,
+        mutability_config: TokenMutabilityConfig,
+        property_keys: vector<String>,
+        property_values: vector<vector<u8>>,
+        property_types: vector<String>,
+    }
+
+    #[event]
+    struct TokenDataCreation has drop, store {
+        creator: address,
+        id: TokenDataId,
+        description: String,
+        maximum: u64,
+        uri: String,
+        royalty_payee_address: address,
+        royalty_points_denominator: u64,
+        royalty_points_numerator: u64,
+        name: String,
+        mutability_config: TokenMutabilityConfig,
+        property_keys: vector<String>,
+        property_values: vector<vector<u8>>,
+        property_types: vector<String>,
+    }
+
     /// mint token event. This event triggered when creator adds more supply to existing token
     struct MintTokenEvent has drop, store {
+        id: TokenDataId,
+        amount: u64,
+    }
+
+    #[deprecated]
+    #[event]
+    struct MintToken has drop, store {
+        id: TokenDataId,
+        amount: u64,
+    }
+
+    #[event]
+    struct Mint has drop, store {
+        creator: address,
         id: TokenDataId,
         amount: u64,
     }
@@ -323,6 +403,21 @@ module aptos_token::token {
         amount: u64,
     }
 
+    #[deprecated]
+    #[event]
+    struct BurnToken has drop, store {
+        id: TokenId,
+        amount: u64,
+    }
+
+    #[event]
+    struct Burn has drop, store {
+        account: address,
+        id: TokenId,
+        amount: u64,
+    }
+
+
     ///
     struct MutateTokenPropertyMapEvent has drop, store {
         old_id: TokenId,
@@ -332,8 +427,37 @@ module aptos_token::token {
         types: vector<String>,
     }
 
+    #[deprecated]
+    #[event]
+    struct MutateTokenPropertyMap has drop, store {
+        old_id: TokenId,
+        new_id: TokenId,
+        keys: vector<String>,
+        values: vector<vector<u8>>,
+        types: vector<String>,
+    }
+
+    #[event]
+    struct MutatePropertyMap has drop, store {
+        account: address,
+        old_id: TokenId,
+        new_id: TokenId,
+        keys: vector<String>,
+        values: vector<vector<u8>>,
+        types: vector<String>,
+    }
+
     /// create collection event with creator address and collection name
     struct CreateCollectionEvent has drop, store {
+        creator: address,
+        collection_name: String,
+        uri: String,
+        description: String,
+        maximum: u64,
+    }
+
+    #[event]
+    struct CreateCollection has drop, store {
         creator: address,
         collection_name: String,
         uri: String,
@@ -539,10 +663,14 @@ module aptos_token::token {
         // Burn the tokens.
         let Token { id: _, amount: burned_amount, token_properties: _ } = withdraw_with_event_internal(owner, token_id, amount);
         let token_store = borrow_global_mut<TokenStore>(owner);
-        event::emit_event<BurnTokenEvent>(
-            &mut token_store.burn_events,
-            BurnTokenEvent { id: token_id, amount: burned_amount },
-        );
+        if (std::features::module_event_migration_enabled()) {
+            event::emit(Burn { account: owner, id: token_id, amount: burned_amount });
+        } else {
+            event::emit_event<BurnTokenEvent>(
+                &mut token_store.burn_events,
+                BurnTokenEvent { id: token_id, amount: burned_amount }
+            );
+        };
 
         if (token_data.maximum > 0) {
             token_data.supply = token_data.supply - burned_amount;
@@ -605,10 +733,14 @@ module aptos_token::token {
         // Burn the tokens.
         let Token { id: _, amount: burned_amount, token_properties: _ } = withdraw_token(owner, token_id, amount);
         let token_store = borrow_global_mut<TokenStore>(signer::address_of(owner));
-        event::emit_event<BurnTokenEvent>(
-            &mut token_store.burn_events,
-            BurnTokenEvent { id: token_id, amount: burned_amount },
-        );
+        if (std::features::module_event_migration_enabled()) {
+            event::emit(Burn { account: signer::address_of(owner), id: token_id, amount: burned_amount });
+        } else {
+            event::emit_event<BurnTokenEvent>(
+                &mut token_store.burn_events,
+                BurnTokenEvent { id: token_id, amount: burned_amount }
+            );
+        };
 
         // Decrease the supply correspondingly by the amount of tokens burned.
         let token_data = table::borrow_mut(
@@ -825,16 +957,27 @@ module aptos_token::token {
             };
             direct_deposit(token_owner, new_token);
             update_token_property_internal(token_owner, new_token_id, keys, values, types);
-            event::emit_event<MutateTokenPropertyMapEvent>(
-                &mut borrow_global_mut<TokenStore>(token_owner).mutate_token_property_events,
-                MutateTokenPropertyMapEvent {
+            if (std::features::module_event_migration_enabled()) {
+                event::emit(MutatePropertyMap {
+                    account: token_owner,
                     old_id: token_id,
                     new_id: new_token_id,
                     keys,
                     values,
                     types
-                },
-            );
+                });
+            } else {
+                event::emit_event<MutateTokenPropertyMapEvent>(
+                    &mut borrow_global_mut<TokenStore>(token_owner).mutate_token_property_events,
+                    MutateTokenPropertyMapEvent {
+                        old_id: token_id,
+                        new_id: new_token_id,
+                        keys,
+                        values,
+                        types
+                    },
+                );
+            };
 
             token_data.largest_property_version = cur_property_version;
             // burn the orignial property_version 0 token after mutation
@@ -843,16 +986,27 @@ module aptos_token::token {
         } else {
             // only 1 copy for the token with property verion bigger than 0
             update_token_property_internal(token_owner, token_id, keys, values, types);
-            event::emit_event<MutateTokenPropertyMapEvent>(
-                &mut borrow_global_mut<TokenStore>(token_owner).mutate_token_property_events,
-                MutateTokenPropertyMapEvent {
+            if (std::features::module_event_migration_enabled()) {
+                event::emit(MutatePropertyMap {
+                    account: token_owner,
                     old_id: token_id,
                     new_id: token_id,
                     keys,
                     values,
                     types
-                },
-            );
+                });
+            } else {
+                event::emit_event<MutateTokenPropertyMapEvent>(
+                    &mut borrow_global_mut<TokenStore>(token_owner).mutate_token_property_events,
+                    MutateTokenPropertyMapEvent {
+                        old_id: token_id,
+                        new_id: token_id,
+                        keys,
+                        values,
+                        types
+                    },
+                );
+            };
             token_id
         }
     }
@@ -1059,16 +1213,28 @@ module aptos_token::token {
 
         table::add(collection_data, name, collection);
         let collection_handle = borrow_global_mut<Collections>(account_addr);
-        event::emit_event<CreateCollectionEvent>(
-            &mut collection_handle.create_collection_events,
-            CreateCollectionEvent {
-                creator: account_addr,
-                collection_name: name,
-                uri,
-                description,
-                maximum,
-            }
-        );
+        if (std::features::module_event_migration_enabled()) {
+            event::emit(
+                CreateCollection {
+                    creator: account_addr,
+                    collection_name: name,
+                    uri,
+                    description,
+                    maximum,
+                }
+            );
+        } else {
+            event::emit_event<CreateCollectionEvent>(
+                &mut collection_handle.create_collection_events,
+                CreateCollectionEvent {
+                    creator: account_addr,
+                    collection_name: name,
+                    uri,
+                    description,
+                    maximum,
+                }
+            );
+        };
     }
 
     public fun check_collection_exists(creator: address, name: String): bool acquires Collections {
@@ -1155,24 +1321,44 @@ module aptos_token::token {
         };
 
         table::add(&mut collections.token_data, token_data_id, token_data);
+        if (std::features::module_event_migration_enabled()) {
+            event::emit(
+                TokenDataCreation {
+                    creator: account_addr,
+                    id: token_data_id,
+                    description,
+                    maximum,
+                    uri,
+                    royalty_payee_address,
+                    royalty_points_denominator,
+                    royalty_points_numerator,
+                    name,
+                    mutability_config: token_mutate_config,
+                    property_keys,
+                    property_values,
+                    property_types,
+                }
+            );
+        } else {
+            event::emit_event<CreateTokenDataEvent>(
+                &mut collections.create_token_data_events,
+                CreateTokenDataEvent {
+                    id: token_data_id,
+                    description,
+                    maximum,
+                    uri,
+                    royalty_payee_address,
+                    royalty_points_denominator,
+                    royalty_points_numerator,
+                    name,
+                    mutability_config: token_mutate_config,
+                    property_keys,
+                    property_values,
+                    property_types,
+                },
+            );
+        };
 
-        event::emit_event<CreateTokenDataEvent>(
-            &mut collections.create_token_data_events,
-            CreateTokenDataEvent {
-                id: token_data_id,
-                description,
-                maximum,
-                uri,
-                royalty_payee_address,
-                royalty_points_denominator,
-                royalty_points_numerator,
-                name,
-                mutability_config: token_mutate_config,
-                property_keys,
-                property_values,
-                property_types,
-            },
-        );
         token_data_id
     }
 
@@ -1277,13 +1463,17 @@ module aptos_token::token {
 
         // we add more tokens with property_version 0
         let token_id = create_token_id(token_data_id, 0);
-        event::emit_event<MintTokenEvent>(
-            &mut borrow_global_mut<Collections>(creator_addr).mint_token_events,
-            MintTokenEvent {
-                id: token_data_id,
-                amount,
-            }
-        );
+        if (std::features::module_event_migration_enabled()) {
+            event::emit(Mint { creator: creator_addr, id: token_data_id, amount })
+        } else {
+            event::emit_event<MintTokenEvent>(
+                &mut borrow_global_mut<Collections>(creator_addr).mint_token_events,
+                MintTokenEvent {
+                    id: token_data_id,
+                    amount,
+                }
+            );
+        };
 
         deposit_token(account,
             Token {
@@ -1321,13 +1511,17 @@ module aptos_token::token {
         // we add more tokens with property_version 0
         let token_id = create_token_id(token_data_id, 0);
 
-        event::emit_event<MintTokenEvent>(
-            &mut borrow_global_mut<Collections>(creator_addr).mint_token_events,
-            MintTokenEvent {
-                id: token_data_id,
-                amount,
-            }
-        );
+        if (std::features::module_event_migration_enabled()) {
+            event::emit(Mint { creator: creator_addr, id: token_data_id, amount })
+        } else {
+            event::emit_event<MintTokenEvent>(
+                &mut borrow_global_mut<Collections>(creator_addr).mint_token_events,
+                MintTokenEvent {
+                    id: token_data_id,
+                    amount,
+                }
+            );
+        };
 
         direct_deposit(receiver,
             Token {
@@ -1588,10 +1782,15 @@ module aptos_token::token {
         );
 
         let token_store = borrow_global_mut<TokenStore>(account_addr);
-        event::emit_event<WithdrawEvent>(
-            &mut token_store.withdraw_events,
-            WithdrawEvent { id, amount },
-        );
+        if (std::features::module_event_migration_enabled()) {
+            event::emit(TokenWithdraw { account: account_addr, id, amount })
+        } else {
+            event::emit_event<WithdrawEvent>(
+                &mut token_store.withdraw_events,
+                WithdrawEvent { id, amount }
+            );
+        };
+
         let tokens = &mut borrow_global_mut<TokenStore>(account_addr).tokens;
         assert!(
             table::contains(tokens, id),
@@ -1627,10 +1826,14 @@ module aptos_token::token {
         assert!(token.amount > 0, error::invalid_argument(ETOKEN_CANNOT_HAVE_ZERO_AMOUNT));
         let token_store = borrow_global_mut<TokenStore>(account_addr);
 
-        event::emit_event<DepositEvent>(
-            &mut token_store.deposit_events,
-            DepositEvent { id: token.id, amount: token.amount },
-        );
+        if (std::features::module_event_migration_enabled()) {
+            event::emit(TokenDeposit { account: account_addr, id: token.id, amount: token.amount });
+        } else {
+            event::emit_event<DepositEvent>(
+                &mut token_store.deposit_events,
+                DepositEvent { id: token.id, amount: token.amount },
+            );
+        };
 
         assert!(
             exists<TokenStore>(account_addr),
@@ -1860,7 +2063,12 @@ module aptos_token::token {
             vector<bool>[false, false, false, false, false],
         );
         let collections = borrow_global<Collections>(signer::address_of(&creator));
-        assert!(event::counter(&collections.create_collection_events) == 1, 1);
+        assert!(
+            vector::length(&event::emitted_events<CreateCollection>()) == 1 || vector::length(
+                &event::emitted_events<CreateCollectionEvent>()
+            ) == 1,
+            1
+        );
     }
 
     #[test(creator = @0xAF)]

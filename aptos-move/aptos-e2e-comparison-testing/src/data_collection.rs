@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    dump_and_compile_from_package_metadata, is_aptos_package, CompilationCache, DataManager,
-    IndexWriter, PackageInfo, TxnIndex,
+    data_state_view::DataStateView, dump_and_compile_from_package_metadata, is_aptos_package,
+    CompilationCache, DataManager, IndexWriter, PackageInfo, TxnIndex,
 };
 use anyhow::{format_err, Result};
+use aptos_block_executor::txn_provider::default::DefaultTxnProvider;
 use aptos_framework::natives::code::PackageMetadata;
 use aptos_rest_client::Client;
 use aptos_types::{
@@ -16,10 +17,8 @@ use aptos_types::{
     },
     write_set::TOTAL_SUPPLY_STATE_KEY,
 };
-use aptos_validator_interface::{
-    AptosValidatorInterface, DebuggerStateView, FilterCondition, RestDebuggerInterface,
-};
-use aptos_vm::{AptosVM, VMExecutor};
+use aptos_validator_interface::{AptosValidatorInterface, FilterCondition, RestDebuggerInterface};
+use aptos_vm::{aptos_vm::AptosVMBlockExecutor, VMBlockExecutor};
 use move_core_types::account_address::AccountAddress;
 use std::{
     collections::HashMap,
@@ -45,6 +44,7 @@ impl DataCollection {
         skip_publish_txns: bool,
         dump_write_set: bool,
         skip_source_code: bool,
+        target_account: Option<AccountAddress>,
     ) -> Self {
         Self {
             debugger,
@@ -55,6 +55,7 @@ impl DataCollection {
                 skip_failed_txns,
                 skip_publish_txns,
                 check_source_code: !skip_source_code,
+                target_account,
             },
         }
     }
@@ -67,6 +68,7 @@ impl DataCollection {
         skip_publish_txns: bool,
         dump_write_set: bool,
         skip_source_code: bool,
+        target_account: Option<AccountAddress>,
     ) -> Result<Self> {
         Ok(Self::new(
             Arc::new(RestDebuggerInterface::new(rest_client)),
@@ -76,21 +78,24 @@ impl DataCollection {
             skip_publish_txns,
             dump_write_set,
             skip_source_code,
+            target_account,
         ))
     }
 
     fn execute_transactions_at_version_with_state_view(
         txns: Vec<Transaction>,
-        debugger_stateview: &DebuggerStateView,
+        debugger_state_view: &DataStateView,
     ) -> Result<Vec<TransactionOutput>> {
         let sig_verified_txns: Vec<SignatureVerifiedTransaction> =
             txns.into_iter().map(|x| x.into()).collect::<Vec<_>>();
         // check whether total supply can be retrieved
         // used for debugging the aggregator panic issue, will be removed later
         // FIXME(#10412): remove the assert
-        let val = debugger_stateview.get_state_value(TOTAL_SUPPLY_STATE_KEY.deref());
+        let val = debugger_state_view.get_state_value(TOTAL_SUPPLY_STATE_KEY.deref());
         assert!(val.is_ok() && val.unwrap().is_some());
-        AptosVM::execute_block_no_limit(&sig_verified_txns, debugger_stateview)
+        let txn_provider = DefaultTxnProvider::new(sig_verified_txns);
+        AptosVMBlockExecutor::new()
+            .execute_block_no_limit(&txn_provider, debugger_state_view)
             .map_err(|err| format_err!("Unexpected VM Error: {:?}", err))
     }
 
@@ -114,15 +119,14 @@ impl DataCollection {
             package_name: package_name.clone(),
             upgrade_number,
         };
-
+        if compilation_cache.failed_packages_v1.contains(&package_info) {
+            return None;
+        }
         if !is_aptos_package(&package_name)
             && !compilation_cache
                 .compiled_package_map
                 .contains_key(&package_info)
         {
-            if compilation_cache.failed_packages.contains(&package_info) {
-                return None;
-            }
             let res = dump_and_compile_from_package_metadata(
                 package_info.clone(),
                 current_dir,
@@ -131,7 +135,7 @@ impl DataCollection {
                 None,
             );
             if res.is_err() {
-                println!("compile package failed at:{}", version);
+                eprintln!("{} at: {}", res.unwrap_err(), version);
                 return None;
             }
         }
@@ -167,7 +171,7 @@ impl DataCollection {
         let index_writer = Arc::new(Mutex::new(IndexWriter::new(&self.current_dir)));
 
         let mut cur_version = begin;
-
+        let mut module_registry_map = HashMap::new();
         while cur_version < begin + limit {
             let batch = if cur_version + self.batch_size <= begin + limit {
                 self.batch_size
@@ -176,7 +180,12 @@ impl DataCollection {
             };
             let res_txns = self
                 .debugger
-                .get_and_filter_committed_transactions(cur_version, batch, self.filter_condition)
+                .get_and_filter_committed_transactions(
+                    cur_version,
+                    batch,
+                    self.filter_condition,
+                    &mut module_registry_map,
+                )
                 .await;
             // if error happens when collecting txns, log the version range
             if res_txns.is_err() {
@@ -198,7 +207,7 @@ impl DataCollection {
                     let index = index_writer.clone();
 
                     let state_view =
-                        DebuggerStateView::new_with_data_reads(self.debugger.clone(), version);
+                        DataStateView::new_with_data_reads(self.debugger.clone(), version);
 
                     let txn_execution_thread = tokio::task::spawn_blocking(move || {
                         let epoch_result_res =

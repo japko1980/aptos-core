@@ -16,7 +16,12 @@ use aptos_aggregator::{
     delta_change_set::{delta_add, delta_sub, DeltaOp},
     delta_math::DeltaHistory,
 };
-use aptos_types::executable::ExecutableTestType;
+use aptos_types::{
+    on_chain_config::CurrentTimeMicroseconds,
+    state_store::state_value::{StateValue, StateValueMetadata},
+    write_set::WriteOpKind,
+};
+use bytes::Bytes;
 use claims::{assert_err_eq, assert_none, assert_ok_eq, assert_some_eq};
 use std::sync::Arc;
 mod proptest_types;
@@ -33,8 +38,7 @@ fn match_unresolved(
 
 #[test]
 fn unsync_map_data_basic() {
-    let map: UnsyncMap<KeyType<Vec<u8>>, usize, TestValue, ExecutableTestType, ()> =
-        UnsyncMap::new();
+    let map: UnsyncMap<KeyType<Vec<u8>>, usize, TestValue, ()> = UnsyncMap::new();
 
     let ap = KeyType(b"/foo/b".to_vec());
 
@@ -55,6 +59,66 @@ fn unsync_map_data_basic() {
     );
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TestMetadataValue {
+    metadata: u64,
+}
+
+impl TransactionWrite for TestMetadataValue {
+    fn bytes(&self) -> Option<&Bytes> {
+        unimplemented!("Irrelevant for the test")
+    }
+
+    fn write_op_kind(&self) -> WriteOpKind {
+        unimplemented!("Irrelevant for the test")
+    }
+
+    fn from_state_value(_maybe_state_value: Option<StateValue>) -> Self {
+        unimplemented!("Irrelevant for the test")
+    }
+
+    fn as_state_value(&self) -> Option<StateValue> {
+        unimplemented!("Irrelevant for the test")
+    }
+
+    fn as_state_value_metadata(&self) -> Option<StateValueMetadata> {
+        Some(StateValueMetadata::legacy(
+            self.metadata,
+            &CurrentTimeMicroseconds {
+                microseconds: self.metadata,
+            },
+        ))
+    }
+
+    fn set_bytes(&mut self, _bytes: Bytes) {
+        unimplemented!("Irrelevant for the test")
+    }
+}
+
+#[test]
+fn write_metadata() {
+    let ap = KeyType(b"/foo/b".to_vec());
+
+    let mvtbl: MVHashMap<KeyType<Vec<u8>>, usize, TestMetadataValue, ()> = MVHashMap::new();
+
+    let metadata_5 = TestMetadataValue { metadata: 5 };
+    let metadata_6 = TestMetadataValue { metadata: 6 };
+
+    assert!(mvtbl
+        .data()
+        .write_metadata(ap.clone(), 10, 1, metadata_5.clone()));
+    assert!(mvtbl.data().write_metadata(ap.clone(), 10, 1, metadata_6));
+    assert!(mvtbl
+        .data()
+        .write_metadata(ap.clone(), 10, 1, metadata_5.clone()));
+    // Should be equal to recorded metadata and return false (no change).
+    assert!(!mvtbl
+        .data()
+        .write_metadata(ap.clone(), 10, 1, metadata_5.clone()));
+
+    assert!(mvtbl.data().write_metadata(ap.clone(), 11, 1, metadata_5));
+}
+
 #[test]
 fn create_write_read_placeholder_struct() {
     use MVDataError::*;
@@ -64,8 +128,7 @@ fn create_write_read_placeholder_struct() {
     let ap2 = KeyType(b"/foo/c".to_vec());
     let ap3 = KeyType(b"/foo/d".to_vec());
 
-    let mvtbl: MVHashMap<KeyType<Vec<u8>>, usize, TestValue, ExecutableTestType, ()> =
-        MVHashMap::new();
+    let mvtbl: MVHashMap<KeyType<Vec<u8>>, usize, TestValue, ()> = MVHashMap::new();
 
     // Reads that should go the DB return Err(Uninitialized)
     let r_db = mvtbl.data().fetch_data(&ap1, 5);
@@ -231,7 +294,7 @@ fn create_write_read_placeholder_struct() {
 fn materialize_delta_shortcut() {
     use MVDataOutput::*;
 
-    let vd: VersionedData<KeyType<Vec<u8>>, TestValue> = VersionedData::new();
+    let vd: VersionedData<KeyType<Vec<u8>>, TestValue> = VersionedData::empty();
     let ap = KeyType(b"/foo/b".to_vec());
     let limit = 10000;
 
@@ -276,7 +339,7 @@ fn materialize_delta_shortcut() {
 #[test]
 #[should_panic]
 fn aggregator_base_mismatch() {
-    let vd: VersionedData<KeyType<Vec<u8>>, TestValue> = VersionedData::new();
+    let vd: VersionedData<KeyType<Vec<u8>>, TestValue> = VersionedData::empty();
     let ap = KeyType(b"/foo/b".to_vec());
 
     vd.set_base_value(
@@ -294,7 +357,7 @@ fn aggregator_base_mismatch() {
 #[test]
 #[should_panic]
 fn commit_without_deltas() {
-    let vd: VersionedData<KeyType<Vec<u8>>, TestValue> = VersionedData::new();
+    let vd: VersionedData<KeyType<Vec<u8>>, TestValue> = VersionedData::empty();
     let ap = KeyType(b"/foo/b".to_vec());
 
     // Must panic as there are no deltas at all.
@@ -304,7 +367,7 @@ fn commit_without_deltas() {
 #[test]
 #[should_panic]
 fn commit_without_entry() {
-    let vd: VersionedData<KeyType<Vec<u8>>, TestValue> = VersionedData::new();
+    let vd: VersionedData<KeyType<Vec<u8>>, TestValue> = VersionedData::empty();
     let ap = KeyType(b"/foo/b".to_vec());
 
     vd.add_delta(ap.clone(), 8, delta_add(20, 1000));

@@ -9,7 +9,7 @@ use crate::{
     },
     utils::iterators::ExpectContinuousVersions,
 };
-use aptos_schemadb::{ReadOptions, SchemaBatch, DB};
+use aptos_schemadb::{batch::SchemaBatch, DB};
 use aptos_storage_interface::{AptosDbError, Result};
 use aptos_types::{
     proof::TransactionInfoWithProof,
@@ -64,9 +64,7 @@ impl TransactionInfoDb {
         start_version: Version,
         num_transaction_infos: usize,
     ) -> Result<impl Iterator<Item = Result<TransactionInfo>> + '_> {
-        let mut iter = self
-            .db
-            .iter::<TransactionInfoSchema>(ReadOptions::default())?;
+        let mut iter = self.db.iter::<TransactionInfoSchema>()?;
         iter.seek(&start_version)?;
         iter.expect_continuous_versions(start_version, num_transaction_infos)
     }
@@ -88,13 +86,13 @@ impl TransactionInfoDb {
     pub(crate) fn put_transaction_info(
         version: Version,
         transaction_info: &TransactionInfo,
-        batch: &SchemaBatch,
+        batch: &mut SchemaBatch,
     ) -> Result<()> {
         batch.put::<TransactionInfoSchema>(&version, transaction_info)
     }
 
     /// Deletes the transaction info between a range of version in [begin, end)
-    pub(crate) fn prune(begin: Version, end: Version, batch: &SchemaBatch) -> Result<()> {
+    pub(crate) fn prune(begin: Version, end: Version, batch: &mut SchemaBatch) -> Result<()> {
         for version in begin..end {
             batch.delete::<TransactionInfoSchema>(&version)?;
         }

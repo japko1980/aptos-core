@@ -3,12 +3,14 @@
 
 #![forbid(unsafe_code)]
 
-use crate::{counters::TIMER, move_vm_ext::AptosMoveResolver, natives::aptos_natives_with_builder};
+use crate::{counters::TIMER, move_vm_ext::AptosMoveResolver};
 use aptos_framework::natives::code::PackageRegistry;
+use aptos_gas_schedule::AptosGasParameters;
 use aptos_infallible::RwLock;
 use aptos_metrics_core::TimerHelper;
 use aptos_native_interface::SafeNativeBuilder;
-use aptos_types::on_chain_config::OnChainConfig;
+use aptos_types::{on_chain_config::OnChainConfig, state_store::state_key::StateKey};
+use aptos_vm_environment::environment::AptosEnvironment;
 use bytes::Bytes;
 use move_binary_format::errors::{Location, PartialVMError, VMResult};
 use move_core_types::{
@@ -16,7 +18,7 @@ use move_core_types::{
     language_storage::{ModuleId, CORE_CODE_ADDRESS},
     vm_status::StatusCode,
 };
-use move_vm_runtime::{config::VMConfig, move_vm::MoveVM};
+use move_vm_runtime::{config::VMConfig, move_vm::MoveVM, WithRuntimeEnvironment};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
@@ -30,25 +32,23 @@ static WARM_VM_CACHE: Lazy<WarmVmCache> = Lazy::new(|| WarmVmCache {
     cache: RwLock::new(HashMap::new()),
 });
 
+pub fn flush_warm_vm_cache() {
+    WARM_VM_CACHE.cache.write().clear();
+}
+
 impl WarmVmCache {
     pub(crate) fn get_warm_vm(
-        native_builder: SafeNativeBuilder,
-        vm_config: VMConfig,
+        env: &AptosEnvironment,
         resolver: &impl AptosMoveResolver,
     ) -> VMResult<MoveVM> {
-        WARM_VM_CACHE.get(native_builder, vm_config, resolver)
+        WARM_VM_CACHE.get(env, resolver)
     }
 
-    fn get(
-        &self,
-        mut native_builder: SafeNativeBuilder,
-        vm_config: VMConfig,
-        resolver: &impl AptosMoveResolver,
-    ) -> VMResult<MoveVM> {
+    fn get(&self, env: &AptosEnvironment, resolver: &impl AptosMoveResolver) -> VMResult<MoveVM> {
         let _timer = TIMER.timer_with(&["warm_vm_get"]);
         let id = {
             let _timer = TIMER.timer_with(&["get_warm_vm_id"]);
-            WarmVmId::new(&native_builder, &vm_config, resolver)?
+            WarmVmId::new(env, resolver)?
         };
 
         if let Some(vm) = self.cache.read().get(&id) {
@@ -64,10 +64,7 @@ impl WarmVmCache {
                 return Ok(vm.clone());
             }
 
-            let vm = MoveVM::new_with_config(
-                aptos_natives_with_builder(&mut native_builder),
-                vm_config,
-            )?;
+            let vm = MoveVM::new_with_runtime_environment(env.runtime_environment());
             Self::warm_vm_up(&vm, resolver);
 
             // Not using LruCache because its `::get()` requires &mut self
@@ -89,6 +86,7 @@ impl WarmVmCache {
         //
         // Loading up `0x1::account` should be sufficient as this is the most common module
         // used for prologue, epilogue and transfer functionality.
+        #[allow(deprecated)]
         let _ = vm.load_module(
             &ModuleId::new(CORE_CODE_ADDRESS, ident_str!("account").to_owned()),
             resolver,
@@ -101,22 +99,41 @@ struct WarmVmId {
     natives: Bytes,
     vm_config: Bytes,
     core_packages_registry: Option<Bytes>,
+    inject_create_signer_for_gov_sim: bool,
 }
 
 impl WarmVmId {
-    fn new(
-        native_builder: &SafeNativeBuilder,
-        vm_config: &VMConfig,
-        resolver: &impl AptosMoveResolver,
-    ) -> VMResult<Self> {
+    fn new(env: &AptosEnvironment, resolver: &impl AptosMoveResolver) -> VMResult<Self> {
         let natives = {
+            // Create native builder just in case, even though the environment has more info now.
             let _timer = TIMER.timer_with(&["serialize_native_builder"]);
-            native_builder.id_bytes()
+            let AptosGasParameters { natives, vm } = env
+                .gas_params()
+                .as_ref()
+                .cloned()
+                .unwrap_or(AptosGasParameters::zeros());
+            SafeNativeBuilder::new(
+                env.gas_feature_version(),
+                natives,
+                vm.misc,
+                env.timed_features().clone(),
+                env.features().clone(),
+                // TODO(loader_v2):
+                //   Is this correct? We do not pass gas hook anymore. Probably it is ok because we
+                //   will roll out loader V2 and this should not affect gas calibrations.
+                None,
+            )
+            .id_bytes()
         };
+
+        #[allow(deprecated)]
+        let inject_create_signer_for_gov_sim = env.inject_create_signer_for_gov_sim();
+
         Ok(Self {
             natives,
-            vm_config: Self::vm_config_bytes(vm_config),
+            vm_config: Self::vm_config_bytes(env.vm_config()),
             core_packages_registry: Self::core_packages_id_bytes(resolver)?,
+            inject_create_signer_for_gov_sim,
         })
     }
 
@@ -130,7 +147,13 @@ impl WarmVmId {
     fn core_packages_id_bytes(resolver: &impl AptosMoveResolver) -> VMResult<Option<Bytes>> {
         let bytes = {
             let _timer = TIMER.timer_with(&["fetch_pkgreg"]);
-            resolver.fetch_config(PackageRegistry::access_path().expect("Get AP failed."))
+            resolver.fetch_config_bytes(&StateKey::on_chain_config::<PackageRegistry>().map_err(
+                |err| {
+                    PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
+                        .with_message(format!("failed to create StateKey: {}", err))
+                        .finish(Location::Undefined)
+                },
+            )?)
         };
 
         let core_package_registry = {

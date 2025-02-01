@@ -7,6 +7,7 @@ extern crate core;
 pub mod aptos;
 pub mod error;
 pub mod faucet;
+use error::AptosErrorResponse;
 pub use faucet::FaucetClient;
 pub mod response;
 pub use response::Response;
@@ -15,10 +16,7 @@ pub mod state;
 pub mod types;
 
 pub use crate::client_builder::{AptosBaseUrl, ClientBuilder};
-use crate::{
-    aptos::{AptosVersion, Balance},
-    error::RestError,
-};
+use crate::{aptos::AptosVersion, error::RestError};
 use anyhow::{anyhow, Result};
 pub use aptos_api_types::{
     self, IndexResponseBcs, MoveModuleBytecode, PendingTransaction, Transaction,
@@ -26,20 +24,24 @@ pub use aptos_api_types::{
 use aptos_api_types::{
     deserialize_from_string,
     mime_types::{BCS, BCS_SIGNED_TRANSACTION, BCS_VIEW_FUNCTION, JSON},
-    AptosError, BcsBlock, Block, GasEstimation, HexEncodedBytes, IndexResponse, MoveModuleId,
-    TransactionData, TransactionOnChainData, TransactionsBatchSubmissionResult, UserTransaction,
-    VersionedEvent, ViewFunction, ViewRequest,
+    AptosError, AptosErrorCode, BcsBlock, Block, GasEstimation, HexEncodedBytes, IndexResponse,
+    MoveModuleId, TransactionData, TransactionOnChainData, TransactionsBatchSubmissionResult,
+    UserTransaction, VersionedEvent, ViewFunction, ViewRequest,
 };
 use aptos_crypto::HashValue;
 use aptos_logger::{debug, info, sample, sample::SampleRate};
 use aptos_types::{
     account_address::AccountAddress,
-    account_config::{AccountResource, CoinStoreResource, NewBlockEvent, CORE_CODE_ADDRESS},
+    account_config::{AccountResource, NewBlockEvent, CORE_CODE_ADDRESS},
     contract_event::EventWithVersion,
+    keyless::{Groth16Proof, Pepper, ZeroKnowledgeSig, ZKP},
     state_store::state_key::StateKey,
-    transaction::SignedTransaction,
+    transaction::{authenticator::EphemeralSignature, SignedTransaction},
 };
-use move_core_types::language_storage::StructTag;
+use move_core_types::{
+    ident_str,
+    language_storage::{ModuleId, StructTag, TypeTag},
+};
 use reqwest::{
     header::{ACCEPT, CONTENT_TYPE},
     Client as ReqwestClient, StatusCode,
@@ -47,7 +49,7 @@ use reqwest::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 pub use state::State;
-use std::{collections::BTreeMap, future::Future, time::Duration};
+use std::{collections::BTreeMap, future::Future, str::FromStr, time::Duration};
 use tokio::time::Instant;
 pub use types::{deserialize_from_prefixed_hex_string, Account, Resource};
 use url::Url;
@@ -64,11 +66,63 @@ const X_APTOS_SDK_HEADER_VALUE: &str = concat!("aptos-rust-sdk/", env!("CARGO_PK
 
 type AptosResult<T> = Result<T, RestError>;
 
+#[derive(Deserialize)]
+pub struct Table {
+    pub handle: AccountAddress,
+}
+
+#[derive(Deserialize)]
+pub struct OriginatingAddress {
+    pub address_map: Table,
+}
+
 #[derive(Clone, Debug)]
 pub struct Client {
     inner: ReqwestClient,
     base_url: Url,
     version_path_base: String,
+}
+
+// TODO: Dedupe the pepper/prover request/response types with the ones defined in the service.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PepperRequest {
+    pub jwt_b64: String,
+    #[serde(with = "hex")]
+    pub epk: Vec<u8>,
+    #[serde(with = "hex")]
+    pub epk_blinder: Vec<u8>,
+    pub exp_date_secs: u64,
+    pub uid_key: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PepperResponse {
+    #[serde(with = "hex")]
+    pub pepper: Vec<u8>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ProverRequest {
+    pub jwt_b64: String,
+    #[serde(with = "hex")]
+    pub epk: Vec<u8>,
+    #[serde(with = "hex")]
+    pub epk_blinder: Vec<u8>,
+    pub exp_date_secs: u64,
+    pub exp_horizon_secs: u64,
+    #[serde(with = "hex")]
+    pub pepper: Vec<u8>,
+    pub uid_key: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ProverResponse {
+    proof: Groth16Proof,
+    #[serde(with = "hex")]
+    #[allow(dead_code)]
+    public_inputs_hash: [u8; 32],
+    #[serde(with = "hex")]
+    training_wheels_signature: Vec<u8>,
 }
 
 impl Client {
@@ -99,6 +153,14 @@ impl Client {
 
     pub fn build_path(&self, path: &str) -> AptosResult<Url> {
         Ok(self.base_url.join(&self.version_path_base)?.join(path)?)
+    }
+
+    pub fn get_prover_url(&self) -> Url {
+        self.base_url.join("keyless/prover/v0/prove").unwrap()
+    }
+
+    pub fn get_pepper_url(&self) -> Url {
+        self.base_url.join("keyless/pepper/v0/fetch").unwrap()
     }
 
     pub async fn get_aptos_version(&self) -> AptosResult<Response<AptosVersion>> {
@@ -204,55 +266,98 @@ impl Client {
         Ok(response.and_then(|inner| bcs::from_bytes(&inner))?)
     }
 
-    pub async fn get_account_balance(
+    pub async fn lookup_address(
         &self,
-        address: AccountAddress,
-    ) -> AptosResult<Response<Balance>> {
-        let resp = self
-            .get_account_resource(address, "0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>")
+        address_key: AccountAddress,
+        must_exist: bool,
+    ) -> AptosResult<Response<AccountAddress>> {
+        let originating_address_table: Response<OriginatingAddress> = self
+            .get_account_resource_bcs(CORE_CODE_ADDRESS, "0x1::account::OriginatingAddress")
             .await?;
-        resp.and_then(|resource| {
-            if let Some(res) = resource {
-                Ok(serde_json::from_value::<Balance>(res.data)?)
-            } else {
-                Err(anyhow!("No data returned").into())
-            }
-        })
+
+        let table_handle = originating_address_table.inner().address_map.handle;
+
+        // The derived address that can be used to look up the original address
+        match self
+            .get_table_item_bcs(
+                table_handle,
+                "address",
+                "address",
+                address_key.to_hex_literal(),
+            )
+            .await
+        {
+            Ok(inner) => Ok(inner),
+            Err(RestError::Api(AptosErrorResponse {
+                error:
+                    AptosError {
+                        error_code: AptosErrorCode::TableItemNotFound,
+                        ..
+                    },
+                ..
+            })) => {
+                // If the table item wasn't found, we may check if the account exists
+                if !must_exist {
+                    Ok(Response::new(
+                        address_key,
+                        originating_address_table.state().clone(),
+                    ))
+                } else {
+                    self.get_account_bcs(address_key)
+                        .await
+                        .map(|account_resource| {
+                            Response::new(address_key, account_resource.state().clone())
+                        })
+                }
+            },
+            Err(err) => Err(err),
+        }
     }
 
-    pub async fn get_account_balance_bcs(
+    async fn view_account_balance_bcs_impl(
         &self,
         address: AccountAddress,
         coin_type: &str,
+        version: Option<u64>,
     ) -> AptosResult<Response<u64>> {
-        let resp = self
-            .get_account_resource_bcs::<CoinStoreResource>(
-                address,
-                &format!("0x1::coin::CoinStore<{}>", coin_type),
-            )
-            .await?;
-        resp.and_then(|resource| Ok(resource.coin()))
-    }
-
-    pub async fn get_account_balance_at_version(
-        &self,
-        address: AccountAddress,
-        version: u64,
-    ) -> AptosResult<Response<Balance>> {
-        let resp = self
-            .get_account_resource_at_version(
-                address,
-                "0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>",
+        let resp: Response<Vec<u64>> = self
+            .view_bcs(
+                &ViewFunction {
+                    module: ModuleId::new(AccountAddress::ONE, ident_str!("coin").into()),
+                    function: ident_str!("balance").into(),
+                    ty_args: vec![TypeTag::Struct(Box::new(
+                        StructTag::from_str(coin_type).unwrap(),
+                    ))],
+                    args: vec![bcs::to_bytes(&address).unwrap()],
+                },
                 version,
             )
             .await?;
-        resp.and_then(|resource| {
-            if let Some(res) = resource {
-                Ok(serde_json::from_value::<Balance>(res.data)?)
+
+        resp.and_then(|result| {
+            if result.len() != 1 {
+                Err(anyhow!("Wrong data size returned: {:?}", result).into())
             } else {
-                Err(anyhow!("No data returned").into())
+                Ok(result[0])
             }
         })
+    }
+
+    pub async fn view_apt_account_balance_at_version(
+        &self,
+        address: AccountAddress,
+        version: u64,
+    ) -> AptosResult<Response<u64>> {
+        self.view_account_balance_bcs_impl(address, "0x1::aptos_coin::AptosCoin", Some(version))
+            .await
+    }
+
+    pub async fn view_apt_account_balance(
+        &self,
+        address: AccountAddress,
+    ) -> AptosResult<Response<u64>> {
+        self.view_account_balance_bcs_impl(address, "0x1::aptos_coin::AptosCoin", None)
+            .await
     }
 
     pub async fn get_index(&self) -> AptosResult<Response<IndexResponse>> {
@@ -329,6 +434,29 @@ impl Client {
 
         let response = self.check_and_parse_bcs_response(response).await?;
         Ok(response.and_then(|bytes| bcs::from_bytes(&bytes))?)
+    }
+
+    pub async fn view_bcs_with_json_response(
+        &self,
+        request: &ViewFunction,
+        version: Option<u64>,
+    ) -> AptosResult<Response<Vec<serde_json::Value>>> {
+        let txn_payload = bcs::to_bytes(request)?;
+        let mut url = self.build_path("view")?;
+        if let Some(version) = version {
+            url.set_query(Some(format!("ledger_version={}", version).as_str()));
+        }
+
+        let response = self
+            .inner
+            .post(url)
+            .header(CONTENT_TYPE, BCS_VIEW_FUNCTION)
+            .header(ACCEPT, JSON)
+            .body(txn_payload)
+            .send()
+            .await?;
+
+        self.json(response).await
     }
 
     pub async fn simulate(
@@ -436,7 +564,10 @@ impl Client {
         self.json::<PendingTransaction>(response).await
     }
 
-    pub async fn submit_without_serializing_response(&self, txn: &SignedTransaction) -> Result<()> {
+    pub async fn submit_without_deserializing_response(
+        &self,
+        txn: &SignedTransaction,
+    ) -> Result<()> {
         let txn_payload = bcs::to_bytes(txn)?;
         let url = self.build_path("transactions")?;
 
@@ -560,7 +691,7 @@ impl Client {
     ) -> AptosResult<Response<Transaction>> {
         let expiration_timestamp = transaction.expiration_timestamp_secs();
         self.wait_for_transaction_by_hash(
-            transaction.clone().committed_hash(),
+            transaction.committed_hash(),
             expiration_timestamp,
             Some(DEFAULT_MAX_SERVER_LAG_WAIT_DURATION),
             None,
@@ -574,7 +705,7 @@ impl Client {
     ) -> AptosResult<Response<TransactionOnChainData>> {
         let expiration_timestamp = transaction.expiration_timestamp_secs();
         self.wait_for_transaction_by_hash_bcs(
-            transaction.clone().committed_hash(),
+            transaction.committed_hash(),
             expiration_timestamp,
             Some(DEFAULT_MAX_SERVER_LAG_WAIT_DURATION),
             None,
@@ -634,7 +765,7 @@ impl Client {
                         if let Some(state) = aptos_error_response.state {
                             if expiration_timestamp_secs <= state.timestamp_usecs / 1_000_000 {
                                 if reached_mempool {
-                                    return Err(anyhow!("Transaction expired. It is guaranteed it will not be committed on chain.").into());
+                                    return Err(anyhow!("Used to be pending and now not found. Transaction expired. It is guaranteed it will not be committed on chain.").into());
                                 } else {
                                     // We want to know whether we ever got Pending state from the mempool,
                                     // to warn in case we didn't.
@@ -1209,6 +1340,32 @@ impl Client {
         self.json(response).await
     }
 
+    pub async fn get_account_sequence_number(
+        &self,
+        address: AccountAddress,
+    ) -> AptosResult<Response<u64>> {
+        let res = self.get_account_bcs(address).await;
+
+        match res {
+            Ok(account) => account.and_then(|account| Ok(account.sequence_number())),
+            Err(error) => match error {
+                RestError::Api(error) => {
+                    if matches!(error.error.error_code, AptosErrorCode::AccountNotFound) {
+                        if let Some(state) = error.state {
+                            Ok(Response::new(0, state))
+                        } else {
+                            let ledger_info = self.get_ledger_information().await?;
+                            Ok(Response::new(0, ledger_info.state().clone()))
+                        }
+                    } else {
+                        Err(error::RestError::Api(error))
+                    }
+                },
+                _ => Err(error),
+            },
+        }
+    }
+
     pub async fn get_account_events_bcs(
         &self,
         address: AccountAddress,
@@ -1481,6 +1638,53 @@ impl Client {
         self.check_and_parse_bcs_response(response).await
     }
 
+    pub async fn make_prover_request(&self, req: ProverRequest) -> AptosResult<ZeroKnowledgeSig> {
+        let response: ProverResponse = self
+            .post_json_no_state(self.get_prover_url(), serde_json::to_value(req.clone())?)
+            .await?;
+        let proof = response.proof;
+        let ephem_sig = Some(
+            EphemeralSignature::try_from(response.training_wheels_signature.as_slice())
+                .map_err(anyhow::Error::from)?,
+        );
+        Ok(ZeroKnowledgeSig {
+            proof: ZKP::Groth16(proof),
+            exp_horizon_secs: req.exp_horizon_secs,
+            extra_field: None,
+            override_aud_val: None,
+            training_wheels_signature: ephem_sig,
+        })
+    }
+
+    pub async fn make_pepper_request(&self, req: PepperRequest) -> AptosResult<Pepper> {
+        let response: PepperResponse = self
+            .post_json_no_state(self.get_pepper_url(), serde_json::to_value(req.clone())?)
+            .await?;
+        let pepper = response.pepper;
+        Ok(Pepper::new(
+            pepper.as_slice().try_into().map_err(anyhow::Error::from)?,
+        ))
+    }
+
+    async fn post_json_no_state<T: serde::de::DeserializeOwned>(
+        &self,
+        url: Url,
+        data: serde_json::Value,
+    ) -> AptosResult<T> {
+        let response = self
+            .inner
+            .post(url)
+            .header(ACCEPT, JSON)
+            .json(&data)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            Err(parse_error(response).await)
+        } else {
+            Ok(response.json().await.map_err(anyhow::Error::from)?)
+        }
+    }
+
     async fn post_bcs(
         &self,
         url: Url,
@@ -1582,7 +1786,7 @@ impl Client {
         base: &str,
         limit_per_request: u64,
         ledger_version: Option<u64>,
-        cursor: Option<String>,
+        cursor: &Option<String>,
     ) -> AptosResult<Url> {
         let mut path = format!("{}?limit={}", base, limit_per_request);
         if let Some(ledger_version) = ledger_version {
@@ -1614,11 +1818,11 @@ impl Client {
                 base_path,
                 limit_per_request,
                 ledger_version,
-                cursor,
+                &cursor,
             )?;
             let raw_response = self.inner.get(url).send().await?;
             let response: Response<Vec<T>> = self.json(raw_response).await?;
-            cursor = response.state().cursor.clone();
+            cursor.clone_from(&response.state().cursor);
             if cursor.is_none() {
                 break Ok(response.map(|mut v| {
                     result.append(&mut v);
@@ -1647,13 +1851,13 @@ impl Client {
                 base_path,
                 limit_per_request,
                 ledger_version,
-                cursor,
+                &cursor,
             )?;
             let response: Response<BTreeMap<T, Vec<u8>>> = self
                 .get_bcs(url)
                 .await?
                 .and_then(|inner| bcs::from_bytes(&inner))?;
-            cursor = response.state().cursor.clone();
+            cursor.clone_from(&response.state().cursor);
             if cursor.is_none() {
                 break Ok(response.map(|mut v| {
                     result.append(&mut v);

@@ -23,19 +23,21 @@ use tokio::task::spawn_blocking;
 
 static TEST_REQUEST_ACCOUNT: Lazy<AccountAddress> = Lazy::new(AccountAddress::random);
 
-fn batch_store_for_test(memory_quota: usize) -> Arc<BatchStore> {
+pub fn batch_store_for_test(memory_quota: usize) -> Arc<BatchStore> {
     let tmp_dir = TempPath::new();
     let db = Arc::new(QuorumStoreDB::new(&tmp_dir));
     let (signers, _validator_verifier) = random_validator_verifier(4, None, false);
 
     Arc::new(BatchStore::new(
         10, // epoch
+        false,
         10, // last committed round
         db,
         memory_quota, // memory_quota
         2001,         // db quota
         2001,         // batch quota
         signers[0].clone(),
+        0,
     ))
 }
 
@@ -60,22 +62,22 @@ fn request_for_test(
     )
 }
 
-#[test]
-fn test_insert_expire() {
+#[tokio::test]
+async fn test_insert_expire() {
     let batch_store = batch_store_for_test(30);
 
     let digest = HashValue::random();
 
     assert_ok_eq!(
-        batch_store.insert_to_cache(request_for_test(&digest, 15, 10, None)),
+        batch_store.insert_to_cache(&request_for_test(&digest, 15, 10, None)),
         true
     );
     assert_ok_eq!(
-        batch_store.insert_to_cache(request_for_test(&digest, 30, 10, None)),
+        batch_store.insert_to_cache(&request_for_test(&digest, 30, 10, None)),
         true
     );
     assert_ok_eq!(
-        batch_store.insert_to_cache(request_for_test(&digest, 25, 10, None)),
+        batch_store.insert_to_cache(&request_for_test(&digest, 25, 10, None)),
         false
     );
     let expired = batch_store.clear_expired_payload(27);
@@ -98,7 +100,12 @@ async fn test_extend_expiration_vs_save() {
         .map(|i| {
             // Pre-insert some of them.
             if i % 2 == 0 {
-                assert_ok!(batch_store.save(request_for_test(&digests[i], i as u64 + 30, 1, None)));
+                assert_ok!(batch_store.save(&request_for_test(
+                    &digests[i],
+                    i as u64 + 30,
+                    1,
+                    None
+                )));
             }
 
             request_for_test(&digests[i], i as u64 + 40, 1, None)
@@ -125,7 +132,7 @@ async fn test_extend_expiration_vs_save() {
                 }
             }
 
-            if batch_store_clone1.save(later_exp_value).is_err() {
+            if batch_store_clone1.save(&later_exp_value).is_err() {
                 // Save in a separate flag and break so test doesn't hang.
                 save_error_clone1.store(true, Ordering::Release);
                 break;
@@ -160,7 +167,7 @@ async fn test_extend_expiration_vs_save() {
         }
 
         if i % 2 == 1 {
-            assert_ok!(batch_store.save(request_for_test(&digest, i as u64 + 30, 1, None)));
+            assert_ok!(batch_store.save(&request_for_test(&digest, i as u64 + 30, 1, None)));
         }
 
         // Unleash the threads.
@@ -220,8 +227,8 @@ fn test_quota_manager() {
     assert_ok_eq!(qm.update_quota(2), StorageMode::MemoryAndPersisted);
 }
 
-#[test]
-fn test_get_local_batch() {
+#[tokio::test]
+async fn test_get_local_batch() {
     let store = batch_store_for_test(30);
 
     let digest_1 = HashValue::random();

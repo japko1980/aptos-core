@@ -18,7 +18,7 @@ use crate::{
     move_tool::{FrameworkPackageArgs, IncludedArtifacts},
     CliCommand, CliResult,
 };
-use aptos_api_types::ViewRequest;
+use aptos_api_types::ViewFunction;
 use aptos_cached_packages::aptos_stdlib;
 use aptos_crypto::HashValue;
 use aptos_framework::{BuildOptions, BuiltPackage, ReleasePackage};
@@ -30,6 +30,7 @@ use aptos_rest_client::{
 use aptos_sdk::move_types::language_storage::CORE_CODE_ADDRESS;
 use aptos_types::{
     account_address::AccountAddress,
+    account_config::is_aptos_governance_create_proposal_event,
     event::EventHandle,
     governance::VotingRecords,
     stake_pool::StakePool,
@@ -38,7 +39,14 @@ use aptos_types::{
 };
 use async_trait::async_trait;
 use clap::Parser;
-use move_core_types::transaction_argument::TransactionArgument;
+use move_core_types::{
+    ident_str, language_storage::ModuleId, parser::parse_type_tag,
+    transaction_argument::TransactionArgument,
+};
+use move_model::metadata::{
+    CompilerVersion, LanguageVersion, LATEST_STABLE_COMPILER_VERSION,
+    LATEST_STABLE_LANGUAGE_VERSION,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -440,20 +448,21 @@ async fn get_metadata_from_url(metadata_url: &Url) -> CliTypedResult<Vec<u8>> {
 fn extract_proposal_id(txn: &Transaction) -> CliTypedResult<Option<u64>> {
     if let Transaction::UserTransaction(inner) = txn {
         // Find event with proposal id
-        let proposal_id = if let Some(event) = inner.events.iter().find(|event| {
-            event.typ.to_string().as_str() == "0x1::aptos_governance::CreateProposalEvent"
-        }) {
-            let data: CreateProposalEvent =
-                serde_json::from_value(event.data.clone()).map_err(|_| {
-                    CliError::UnexpectedError(
-                        "Failed to parse Proposal event to get ProposalId".to_string(),
-                    )
-                })?;
-            Some(data.proposal_id.0)
-        } else {
-            warn!("No proposal event found to find proposal id");
-            None
-        };
+        let proposal_id =
+            if let Some(event) = inner.events.iter().find(|event| {
+                is_aptos_governance_create_proposal_event(event.typ.to_string().as_str())
+            }) {
+                let data: CreateProposalEvent = serde_json::from_value(event.data.clone())
+                    .map_err(|_| {
+                        CliError::UnexpectedError(
+                            "Failed to parse Proposal event to get ProposalId".to_string(),
+                        )
+                    })?;
+                Some(data.proposal_id.0)
+            } else {
+                warn!("No proposal event found to find proposal id");
+                None
+            };
 
         return Ok(proposal_id);
     }
@@ -469,7 +478,7 @@ struct CreateProposalEvent {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ProposalSubmissionSummary {
-    proposal_id: Option<u64>,
+    pub proposal_id: Option<u64>,
     #[serde(flatten)]
     transaction: TransactionSummary,
 }
@@ -605,14 +614,15 @@ impl SubmitVote {
         let is_proposal_closed = self
             .args
             .txn_options
-            .view(ViewRequest {
-                function: "0x1::voting::is_voting_closed".parse().unwrap(),
-                type_arguments: vec!["0x1::governance_proposal::GovernanceProposal"
-                    .parse()
-                    .unwrap()],
-                arguments: vec![
-                    serde_json::Value::String("0x1".to_string()),
-                    serde_json::Value::String(proposal_id.to_string()),
+            .view(ViewFunction {
+                module: ModuleId::new(AccountAddress::ONE, ident_str!("voting").to_owned()),
+                function: ident_str!("is_voting_closed").to_owned(),
+                ty_args: vec![
+                    parse_type_tag("0x1::governance_proposal::GovernanceProposal").unwrap(),
+                ],
+                args: vec![
+                    bcs::to_bytes(&AccountAddress::ONE).unwrap(),
+                    bcs::to_bytes(&proposal_id).unwrap(),
                 ],
             })
             .await?[0]
@@ -630,14 +640,16 @@ impl SubmitVote {
             let remaining_voting_power = self
                 .args
                 .txn_options
-                .view(ViewRequest {
-                    function: "0x1::aptos_governance::get_remaining_voting_power"
-                        .parse()
-                        .unwrap(),
-                    type_arguments: vec![],
-                    arguments: vec![
-                        serde_json::Value::String(pool_address.to_string()),
-                        serde_json::Value::String(proposal_id.to_string()),
+                .view(ViewFunction {
+                    module: ModuleId::new(
+                        AccountAddress::ONE,
+                        ident_str!("aptos_governance").to_owned(),
+                    ),
+                    function: ident_str!("get_remaining_voting_power").to_owned(),
+                    ty_args: vec![],
+                    args: vec![
+                        bcs::to_bytes(&pool_address).unwrap(),
+                        bcs::to_bytes(&proposal_id).unwrap(),
                     ],
                 })
                 .await?[0]
@@ -763,12 +775,14 @@ impl std::fmt::Display for ProposalMetadata {
     }
 }
 
-fn compile_in_temp_dir(
+pub fn compile_in_temp_dir(
     script_name: &str,
     script_path: &Path,
     framework_package_args: &FrameworkPackageArgs,
     prompt_options: PromptOptions,
     bytecode_version: Option<u32>,
+    language_version: Option<LanguageVersion>,
+    compiler_version: Option<CompilerVersion>,
 ) -> CliTypedResult<(Vec<u8>, HashValue)> {
     // Make a temporary directory for compilation
     let temp_dir = TempDir::new().map_err(|err| {
@@ -808,6 +822,8 @@ fn compile_in_temp_dir(
         framework_package_args.skip_fetch_latest_git_deps,
         package_dir,
         bytecode_version,
+        language_version,
+        compiler_version,
     )
 }
 
@@ -815,6 +831,8 @@ fn compile_script(
     skip_fetch_latest_git_deps: bool,
     package_dir: &Path,
     bytecode_version: Option<u32>,
+    language_version: Option<LanguageVersion>,
+    compiler_version: Option<CompilerVersion>,
 ) -> CliTypedResult<(Vec<u8>, HashValue)> {
     let build_options = BuildOptions {
         with_srcs: false,
@@ -823,6 +841,8 @@ fn compile_script(
         with_error_map: false,
         skip_fetch_latest_git_deps,
         bytecode_version,
+        language_version,
+        compiler_version,
         ..BuildOptions::default()
     };
 
@@ -879,7 +899,7 @@ impl CliCommand<TransactionSummary> for ExecuteProposal {
 }
 
 /// Compile a specified script.
-#[derive(Parser)]
+#[derive(Parser, Default)]
 pub struct CompileScriptFunction {
     /// Path to the Move script for the proposal
     #[clap(long, group = "script", value_parser)]
@@ -890,10 +910,34 @@ pub struct CompileScriptFunction {
     pub compiled_script_path: Option<PathBuf>,
 
     #[clap(flatten)]
-    pub(crate) framework_package_args: FrameworkPackageArgs,
+    pub framework_package_args: FrameworkPackageArgs,
 
-    #[clap(long)]
-    pub(crate) bytecode_version: Option<u32>,
+    #[clap(long, default_value_if("move_2", "true", "7"))]
+    pub bytecode_version: Option<u32>,
+
+    /// Specify the version of the compiler.
+    /// Defaults to the latest stable compiler version (at least 2)
+    #[clap(long, value_parser = clap::value_parser!(CompilerVersion),
+           default_value = LATEST_STABLE_COMPILER_VERSION,
+           default_value_if("move_2", "true", LATEST_STABLE_COMPILER_VERSION),
+           default_value_if("move_1", "true", "1"),)]
+    pub compiler_version: Option<CompilerVersion>,
+
+    /// Specify the language version to be supported.
+    /// Defaults to the latest stable language version (at least 2)
+    #[clap(long, value_parser = clap::value_parser!(LanguageVersion),
+           default_value = LATEST_STABLE_LANGUAGE_VERSION,
+           default_value_if("move_2", "true", LATEST_STABLE_LANGUAGE_VERSION),
+           default_value_if("move_1", "true", "1"),)]
+    pub language_version: Option<LanguageVersion>,
+
+    /// Select bytecode, language, compiler for Move 2
+    #[clap(long, default_value_t = true)]
+    pub move_2: bool,
+
+    /// Select bytecode, language, and compiler versions for Move 1.
+    #[clap(long, default_value_t = false)]
+    pub move_1: bool,
 }
 
 impl CompileScriptFunction {
@@ -939,6 +983,10 @@ impl CompileScriptFunction {
             &self.framework_package_args,
             prompt_options,
             self.bytecode_version,
+            self.language_version
+                .or_else(|| Some(LanguageVersion::latest_stable())),
+            self.compiler_version
+                .or_else(|| Some(CompilerVersion::latest_stable())),
         )
     }
 }
@@ -991,15 +1039,7 @@ impl CliCommand<()> for GenerateUpgradeProposal {
             next_execution_hash,
         } = self;
         let package_path = move_options.get_package_path()?;
-        let options = included_artifacts.build_options(
-            move_options.dev,
-            move_options.skip_fetch_latest_git_deps,
-            move_options.named_addresses(),
-            move_options.bytecode_version,
-            move_options.compiler_version,
-            move_options.skip_attribute_checks,
-            move_options.check_test_code,
-        );
+        let options = included_artifacts.build_options(&move_options)?;
         let package = BuiltPackage::build(package_path, options)?;
         let release = ReleasePackage::new(package)?;
 
@@ -1012,10 +1052,14 @@ impl CliCommand<()> for GenerateUpgradeProposal {
             // If we're generating a multi-step proposal
         } else {
             let next_execution_hash_bytes = hex::decode(next_execution_hash)?;
+            let next_execution_hash =
+                HashValue::from_slice(next_execution_hash_bytes).map_err(|_err| {
+                    CliError::CommandArgumentError("Invalid next execution hash".to_string())
+                })?;
             release.generate_script_proposal_multi_step(
                 account,
                 output,
-                next_execution_hash_bytes,
+                Some(next_execution_hash),
             )?;
         };
         Ok(())
@@ -1054,13 +1098,11 @@ impl GenerateExecutionHash {
         };
         CompileScriptFunction {
             script_path: self.script_path.clone(),
-            compiled_script_path: None,
             framework_package_args: FrameworkPackageArgs {
-                framework_git_rev: None,
                 framework_local_dir,
-                skip_fetch_latest_git_deps: false,
+                ..FrameworkPackageArgs::default()
             },
-            bytecode_version: None,
+            ..CompileScriptFunction::default()
         }
         .compile("execution_hash", PromptOptions::yes())
     }

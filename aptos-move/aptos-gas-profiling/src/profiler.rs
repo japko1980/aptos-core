@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::log::{
-    CallFrame, EventStorage, ExecutionAndIOCosts, ExecutionGasEvent, FrameName, StorageFees,
-    TransactionGasLog, WriteOpType, WriteStorage, WriteTransient,
+    CallFrame, Dependency, EventStorage, EventTransient, ExecutionAndIOCosts, ExecutionGasEvent,
+    FrameName, StorageFees, TransactionGasLog, WriteOpType, WriteStorage, WriteTransient,
 };
-use aptos_gas_algebra::{Fee, FeePerGasUnit, InternalGas, NumArgs, NumBytes};
-use aptos_gas_meter::AptosGasMeter;
-use aptos_types::{state_store::state_key::StateKey, write_set::WriteOpSize};
+use aptos_gas_algebra::{Fee, FeePerGasUnit, InternalGas, NumArgs, NumBytes, NumTypeNodes};
+use aptos_gas_meter::{AptosGasMeter, GasAlgebra};
+use aptos_types::{
+    contract_event::ContractEvent, state_store::state_key::StateKey, write_set::WriteOpSize,
+};
 use aptos_vm_types::{
-    change_set::VMChangeSet, resolver::ExecutorView, storage::space_pricing::ChargeAndRefund,
+    change_set::ChangeSetInterface, module_and_script_storage::module_storage::AptosModuleStorage,
+    resolver::ExecutorView, storage::space_pricing::ChargeAndRefund,
 };
 use move_binary_format::{
     errors::{Location, PartialVMResult, VMResult},
@@ -18,7 +21,7 @@ use move_binary_format::{
 };
 use move_core_types::{
     account_address::AccountAddress,
-    identifier::Identifier,
+    identifier::{IdentStr, Identifier},
     language_storage::{ModuleId, TypeTag},
 };
 use move_vm_types::{
@@ -32,8 +35,11 @@ pub struct GasProfiler<G> {
     base: G,
 
     intrinsic_cost: Option<InternalGas>,
-    total_exec_io: InternalGas,
+    keyless_cost: Option<InternalGas>,
+    dependencies: Vec<Dependency>,
     frames: Vec<CallFrame>,
+    transaction_transient: Option<InternalGas>,
+    events_transient: Vec<EventTransient>,
     write_set_transient: Vec<WriteTransient>,
     storage_fees: Option<StorageFees>,
 }
@@ -86,8 +92,11 @@ impl<G> GasProfiler<G> {
             base,
 
             intrinsic_cost: None,
-            total_exec_io: 0.into(),
+            keyless_cost: None,
+            dependencies: vec![],
             frames: vec![CallFrame::new_script()],
+            transaction_transient: None,
+            events_transient: vec![],
             write_set_transient: vec![],
             storage_fees: None,
         }
@@ -103,8 +112,11 @@ impl<G> GasProfiler<G> {
             base,
 
             intrinsic_cost: None,
-            total_exec_io: 0.into(),
+            keyless_cost: None,
+            dependencies: vec![],
             frames: vec![CallFrame::new_function(module_id, func_name, ty_args)],
+            transaction_transient: None,
+            events_transient: vec![],
             write_set_transient: vec![],
             storage_fees: None,
         }
@@ -120,16 +132,6 @@ where
     }
 
     fn record_gas_event(&mut self, event: ExecutionGasEvent) {
-        use ExecutionGasEvent::*;
-
-        match &event {
-            Loc(..) => (),
-            Call(..) => unreachable!("call frames are handled separately"),
-            Bytecode { cost, .. } | CallNative { cost, .. } | LoadResource { cost, .. } => {
-                self.total_exec_io += *cost;
-            },
-        }
-
         self.active_event_stream().push(event);
     }
 
@@ -321,6 +323,14 @@ where
         let (cost, res) =
             self.delegate_charge(|base| base.charge_native_function(amount, ret_vals));
 
+        // Whenever a function gets called, the VM will notify the gas profiler
+        // via `charge_call/charge_call_generic`.
+        //
+        // At this point of time, the gas profiler does not yet have an efficient way to determine
+        // whether the function is a native or not, so it will blindly create a new frame.
+        //
+        // Later when it realizes the function is native, it will transform the original frame
+        // into a native-specific event that does not contain recursive structures.
         let cur = self.frames.pop().expect("frame must exist");
         let (module_id, name, ty_args) = match cur.name {
             FrameName::Function {
@@ -330,6 +340,11 @@ where
             } => (module_id, name, ty_args),
             FrameName::Script => unreachable!(),
         };
+        // The following line of code is needed for correctness.
+        //
+        // This is because additional gas events may be produced after the frame has been
+        // created and these events need to be preserved.
+        self.active_event_stream().extend(cur.events);
 
         self.record_gas_event(ExecutionGasEvent::CallNative {
             module_id,
@@ -458,6 +473,36 @@ where
 
         res
     }
+
+    fn charge_create_ty(&mut self, num_nodes: NumTypeNodes) -> PartialVMResult<()> {
+        let (cost, res) = self.delegate_charge(|base| base.charge_create_ty(num_nodes));
+
+        self.record_gas_event(ExecutionGasEvent::CreateTy { cost });
+
+        res
+    }
+
+    fn charge_dependency(
+        &mut self,
+        is_new: bool,
+        addr: &AccountAddress,
+        name: &IdentStr,
+        size: NumBytes,
+    ) -> PartialVMResult<()> {
+        let (cost, res) =
+            self.delegate_charge(|base| base.charge_dependency(is_new, addr, name, size));
+
+        if !cost.is_zero() {
+            self.dependencies.push(Dependency {
+                is_new,
+                id: ModuleId::new(*addr, name.to_owned()),
+                size,
+                cost,
+            });
+        }
+
+        res
+    }
 }
 
 fn write_op_type(op: &WriteOpSize) -> WriteOpType {
@@ -491,10 +536,28 @@ where
         ) -> PartialVMResult<()>;
     }
 
+    fn charge_io_gas_for_transaction(&mut self, txn_size: NumBytes) -> VMResult<()> {
+        let (cost, res) = self.delegate_charge(|base| base.charge_io_gas_for_transaction(txn_size));
+
+        self.transaction_transient = Some(cost);
+
+        res
+    }
+
+    fn charge_io_gas_for_event(&mut self, event: &ContractEvent) -> VMResult<()> {
+        let (cost, res) = self.delegate_charge(|base| base.charge_io_gas_for_event(event));
+
+        self.events_transient.push(EventTransient {
+            ty: event.type_tag().clone(),
+            cost,
+        });
+
+        res
+    }
+
     fn charge_io_gas_for_write(&mut self, key: &StateKey, op: &WriteOpSize) -> VMResult<()> {
         let (cost, res) = self.delegate_charge(|base| base.charge_io_gas_for_write(key, op));
 
-        self.total_exec_io += cost;
         self.write_set_transient.push(WriteTransient {
             key: key.clone(),
             cost,
@@ -506,10 +569,11 @@ where
 
     fn process_storage_fee_for_all(
         &mut self,
-        change_set: &mut VMChangeSet,
+        change_set: &mut impl ChangeSetInterface,
         txn_size: NumBytes,
         gas_unit_price: FeePerGasUnit,
         executor_view: &dyn ExecutorView,
+        module_storage: &impl AptosModuleStorage,
     ) -> VMResult<Fee> {
         // The new storage fee are only active since version 7.
         if self.feature_version() < 7 {
@@ -530,7 +594,7 @@ where
         let mut write_fee = Fee::new(0);
         let mut write_set_storage = vec![];
         let mut total_refund = Fee::new(0);
-        for res in change_set.write_op_info_iter_mut(executor_view) {
+        for res in change_set.write_op_info_iter_mut(executor_view, module_storage) {
             let write_op_info = res.map_err(|err| err.finish(Location::Undefined))?;
             let key = write_op_info.key.clone();
             let op_type = write_op_type(&write_op_info.op_size);
@@ -550,7 +614,7 @@ where
         // Events (no event fee in v2)
         let mut event_fee = Fee::new(0);
         let mut event_fees = vec![];
-        for (event, _) in change_set.events().iter() {
+        for event in change_set.events_iter() {
             let fee = pricing.legacy_storage_fee_per_event(params, event);
             event_fees.push(EventStorage {
                 ty: event.type_tag().clone(),
@@ -588,7 +652,14 @@ where
             self.delegate_charge(|base| base.charge_intrinsic_gas_for_transaction(txn_size));
 
         self.intrinsic_cost = Some(cost);
-        self.total_exec_io += cost;
+
+        res
+    }
+
+    fn charge_keyless(&mut self) -> VMResult<()> {
+        let (_cost, res) = self.delegate_charge(|base| base.charge_keyless());
+
+        // TODO: add keyless
 
         res
     }
@@ -607,9 +678,13 @@ where
 
         let exec_io = ExecutionAndIOCosts {
             gas_scaling_factor: self.base.gas_unit_scaling_factor(),
-            total: self.total_exec_io,
+            total: self.algebra().execution_gas_used() + self.algebra().io_gas_used(),
             intrinsic_cost: self.intrinsic_cost.unwrap_or_else(|| 0.into()),
+            keyless_cost: self.keyless_cost.unwrap_or_else(|| 0.into()),
+            dependencies: self.dependencies,
             call_graph: self.frames.pop().expect("frame must exist"),
+            transaction_transient: self.transaction_transient,
+            events_transient: self.events_transient,
             write_set_transient: self.write_set_transient,
         };
         exec_io.assert_consistency();

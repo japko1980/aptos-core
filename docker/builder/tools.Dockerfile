@@ -1,23 +1,25 @@
 ### Tools Image ###
 FROM debian-base AS tools
 
-RUN echo "deb http://deb.debian.org/debian bullseye main" > /etc/apt/sources.list.d/bullseye.list && \
-    echo "Package: *\nPin: release n=bullseye\nPin-Priority: 50" > /etc/apt/preferences.d/bullseye
-
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get --no-install-recommends --allow-downgrades -y \
     install \
     wget \
     curl \
-    perl-base=5.32.1-4+deb11u1 \
+    perl-base=5.32.1-4+deb11u4 \
     libtinfo6=6.2+20201114-2+deb11u2 \
     git \
-    libssl1.1 \
-    ca-certificates \
-    socat \
+            socat \
     python3-botocore/bullseye \
-    awscli/bullseye
+    awscli/bullseye \
+    gnupg2 \
+    pigz
+
+RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
+    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - && \
+    apt-get -y update && \
+    apt-get -y install google-cloud-sdk
 
 RUN ln -s /usr/bin/python3 /usr/local/bin/python
 COPY --link docker/tools/boto.cfg /etc/boto.cfg

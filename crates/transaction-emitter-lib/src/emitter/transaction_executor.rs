@@ -1,9 +1,9 @@
 // Copyright © Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use super::RETRY_POLICY;
+use super::FETCH_ACCOUNT_RETRY_POLICY;
 use anyhow::{Context, Result};
-use aptos_logger::{debug, sample, sample::SampleRate, warn};
+use aptos_logger::{debug, info, sample, sample::SampleRate, warn};
 use aptos_rest_client::{aptos_api_types::AptosErrorCode, error::RestError, Client as RestClient};
 use aptos_sdk::{
     move_types::account_address::AccountAddress, types::transaction::SignedTransaction,
@@ -19,12 +19,25 @@ use std::{
 
 // Reliable/retrying transaction executor, used for initializing
 pub struct RestApiReliableTransactionSubmitter {
-    pub rest_clients: Vec<RestClient>,
-    pub max_retries: usize,
-    pub retry_after: Duration,
+    rest_clients: Vec<RestClient>,
+    max_retries: usize,
+    retry_after: Duration,
 }
 
 impl RestApiReliableTransactionSubmitter {
+    pub fn new(rest_clients: Vec<RestClient>, max_retries: usize, retry_after: Duration) -> Self {
+        info!(
+            "Using reliable/retriable init transaction executor with {} retries, every {}s",
+            max_retries,
+            retry_after.as_secs_f32()
+        );
+        Self {
+            rest_clients,
+            max_retries,
+            retry_after,
+        }
+    }
+
     fn random_rest_client(&self) -> &RestClient {
         let mut rng = thread_rng();
         self.rest_clients.choose(&mut rng).unwrap()
@@ -69,6 +82,7 @@ impl RestApiReliableTransactionSubmitter {
                 rest_client,
                 txn,
                 self.retry_after,
+                i == 0,
                 &mut failed_submit,
                 &mut failed_wait,
             )
@@ -151,6 +165,17 @@ async fn warn_detailed_error(
     err: Result<&aptos_types::transaction::TransactionInfo, &RestError>,
 ) {
     let sender = txn.sender();
+    use aptos_types::transaction::TransactionPayload::*;
+    let payload = match txn.payload() {
+        Script(_) => "script".to_string(),
+        ModuleBundle(_) => "module_bundle".to_string(),
+        EntryFunction(entry_function) => format!(
+            "entry {}::{}",
+            entry_function.module(),
+            entry_function.function()
+        ),
+        Multisig(_) => "multisig".to_string(),
+    };
     let (last_transactions, seq_num) =
         if let Ok(account) = rest_client.get_account_bcs(sender).await {
             let inner = account.into_inner();
@@ -175,16 +200,17 @@ async fn warn_detailed_error(
             (None, None)
         };
     let balance = rest_client
-        .get_account_balance(sender)
+        .view_apt_account_balance(sender)
         .await
-        .map_or(-1, |v| v.into_inner().get() as i64);
+        .map_or(-1, |v| v.into_inner() as i128);
 
     warn!(
-        "[{:?}] Failed {} transaction: {:?}, seq num: {}, gas: unit {} and max {}, for account {}, last seq_num {:?}, balance of {} and last transaction for account: {:?}",
+        "[{:?}] Failed {} transaction: {:?}, seq num: {}, payload: {}, gas: unit {} and max {}, for account {}, last seq_num {:?}, balance of {} and last transaction for account: {:?}",
         rest_client.path_prefix_string(),
         call_name,
         err,
         txn.sequence_number(),
+        payload,
         txn.gas_unit_price(),
         txn.max_gas_amount(),
         sender,
@@ -198,6 +224,7 @@ async fn submit_and_check(
     rest_client: &RestClient,
     txn: &SignedTransaction,
     wait_duration: Duration,
+    first_try: bool,
     failed_submit: &mut bool,
     failed_wait: &mut bool,
 ) -> Result<()> {
@@ -208,7 +235,11 @@ async fn submit_and_check(
             warn_detailed_error("submitting", rest_client, txn, Err(&err)).await
         );
         *failed_submit = true;
-        if format!("{}", err).contains("SEQUENCE_NUMBER_TOO_OLD") {
+        if first_try && format!("{}", err).contains("SEQUENCE_NUMBER_TOO_OLD") {
+            sample!(
+                SampleRate::Duration(Duration::from_secs(2)),
+                warn_detailed_error("submitting on first try", rest_client, txn, Err(&err)).await
+            );
             // There's no point to wait or retry on this error.
             // TODO: find a better way to propogate this error to the caller.
             Err(err)?
@@ -218,7 +249,7 @@ async fn submit_and_check(
     }
     match rest_client
         .wait_for_transaction_by_hash_bcs(
-            txn.clone().committed_hash(),
+            txn.committed_hash(),
             txn.expiration_timestamp_secs(),
             None,
             Some(wait_duration.saturating_sub(start.elapsed())),
@@ -256,19 +287,13 @@ pub async fn query_sequence_number_with_client(
     rest_client: &RestClient,
     account_address: AccountAddress,
 ) -> Result<u64> {
-    let result = RETRY_POLICY
+    let result = FETCH_ACCOUNT_RETRY_POLICY
         .retry_if(
-            move || rest_client.get_account_bcs(account_address),
+            move || rest_client.get_account_sequence_number(account_address),
             |error: &RestError| !is_account_not_found(error),
         )
         .await;
-    match result {
-        Ok(account) => Ok(account.into_inner().sequence_number()),
-        Err(error) => match is_account_not_found(&error) {
-            true => Ok(0),
-            false => Err(error.into()),
-        },
-    }
+    Ok(*result?.inner())
 }
 
 fn is_account_not_found(error: &RestError) -> bool {
@@ -281,14 +306,23 @@ fn is_account_not_found(error: &RestError) -> bool {
 #[async_trait]
 impl ReliableTransactionSubmitter for RestApiReliableTransactionSubmitter {
     async fn get_account_balance(&self, account_address: AccountAddress) -> Result<u64> {
-        Ok(RETRY_POLICY
-            .retry(move || {
-                self.random_rest_client()
-                    .get_account_balance(account_address)
-            })
+        Ok(FETCH_ACCOUNT_RETRY_POLICY
+            .retry_if(
+                move || {
+                    self.random_rest_client()
+                        .view_apt_account_balance(account_address)
+                },
+                |error: &RestError| match error {
+                    RestError::Api(error) => !matches!(
+                        error.error.error_code,
+                        AptosErrorCode::AccountNotFound | AptosErrorCode::InvalidInput
+                    ),
+                    RestError::Unknown(_) => false,
+                    _ => true,
+                },
+            )
             .await?
-            .into_inner()
-            .get())
+            .into_inner())
     }
 
     async fn query_sequence_number(&self, account_address: AccountAddress) -> Result<u64> {

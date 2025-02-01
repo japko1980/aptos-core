@@ -5,6 +5,7 @@ use crate::{assert_success, tests::common, MoveHarness};
 use aptos_language_e2e_tests::account::Account;
 use aptos_types::{
     account_address::{self, AccountAddress},
+    account_config::ObjectCoreResource,
     event::EventHandle,
     move_utils::MemberId,
     transaction::{EntryFunction, TransactionPayload},
@@ -20,14 +21,6 @@ struct Token {
     name: String,
     uri: String,
     mutation_events: EventHandle,
-}
-
-#[derive(Debug, Deserialize, Eq, PartialEq)]
-struct ObjectCore {
-    guid_creation_num: u64,
-    owner: AccountAddress,
-    allow_ungated_transfer: bool,
-    transfer_events: EventHandle,
 }
 
 #[test]
@@ -50,23 +43,23 @@ fn test_basic_token() {
         address: AccountAddress::from_hex_literal("0x1").unwrap(),
         module: Identifier::new("object").unwrap(),
         name: Identifier::new("ObjectCore").unwrap(),
-        type_params: vec![],
+        type_args: vec![],
     };
     let token_obj_tag = StructTag {
         address: AccountAddress::from_hex_literal("0x4").unwrap(),
         module: Identifier::new("token").unwrap(),
         name: Identifier::new("Token").unwrap(),
-        type_params: vec![],
+        type_args: vec![],
     };
     let obj_group_tag = StructTag {
         address: AccountAddress::from_hex_literal("0x1").unwrap(),
         module: Identifier::new("object").unwrap(),
         name: Identifier::new("ObjectGroup").unwrap(),
-        type_params: vec![],
+        type_args: vec![],
     };
 
     // Ensure that the group data can be read
-    let object_0: ObjectCore = h
+    let object_0: ObjectCoreResource = h
         .read_resource_from_resource_group(&token_addr, obj_group_tag.clone(), obj_tag.clone())
         .unwrap();
     let token_0: Token = h
@@ -89,7 +82,7 @@ fn test_basic_token() {
     assert_success!(result);
 
     // verify all the data remains in a group even when updating just a single resource
-    let object_1: ObjectCore = h
+    let object_1: ObjectCoreResource = h
         .read_resource_from_resource_group(&token_addr, obj_group_tag.clone(), obj_tag)
         .unwrap();
     let mut token_1: Token = h

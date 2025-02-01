@@ -5,21 +5,19 @@
 use crate::{
     config::VMConfig,
     data_cache::TransactionDataCache,
-    loader::{ModuleStorage, ModuleStorageAdapter},
+    loader::{LegacyModuleStorage, LegacyModuleStorageAdapter, Loader},
     native_extensions::NativeContextExtensions,
-    native_functions::NativeFunction,
     runtime::VMRuntime,
     session::Session,
+    RuntimeEnvironment,
 };
 use move_binary_format::{
     errors::{Location, PartialVMError, VMResult},
     CompiledModule,
 };
-use move_core_types::{
-    account_address::AccountAddress, identifier::Identifier, language_storage::ModuleId,
-    metadata::Metadata, resolver::MoveResolver,
-};
-use std::sync::Arc;
+use move_core_types::{language_storage::ModuleId, metadata::Metadata, vm_status::StatusCode};
+use move_vm_types::resolver::MoveResolver;
+use std::{ops::Deref, sync::Arc};
 
 #[derive(Clone)]
 pub struct MoveVM {
@@ -27,20 +25,16 @@ pub struct MoveVM {
 }
 
 impl MoveVM {
-    pub fn new(
-        natives: impl IntoIterator<Item = (AccountAddress, Identifier, Identifier, NativeFunction)>,
-    ) -> VMResult<Self> {
-        Self::new_with_config(natives, VMConfig::default())
+    /// Creates a new VM instance for the given [RuntimeEnvironment].
+    pub fn new_with_runtime_environment(runtime_environment: &RuntimeEnvironment) -> Self {
+        Self {
+            runtime: VMRuntime::new(runtime_environment),
+        }
     }
 
-    pub fn new_with_config(
-        natives: impl IntoIterator<Item = (AccountAddress, Identifier, Identifier, NativeFunction)>,
-        vm_config: VMConfig,
-    ) -> VMResult<Self> {
-        Ok(Self {
-            runtime: VMRuntime::new(natives, vm_config)
-                .map_err(|err| err.finish(Location::Undefined))?,
-        })
+    /// Returns VM configuration used to initialize the VM.
+    pub fn vm_config(&self) -> &VMConfig {
+        self.runtime.loader().vm_config()
     }
 
     /// Create a new Session backed by the given storage.
@@ -57,110 +51,110 @@ impl MoveVM {
     ///     cases where this may not be necessary, with the most notable one being the common module
     ///     publishing flow: you can keep using the same Move VM if you publish some modules in a Session
     ///     and apply the effects to the storage when the Session ends.
-    pub fn new_session<'r>(
-        &self,
-        remote: &'r impl MoveResolver<PartialVMError>,
-    ) -> Session<'r, '_> {
+    pub fn new_session<'r>(&self, remote: &'r impl MoveResolver) -> Session<'r, '_> {
         self.new_session_with_extensions(remote, NativeContextExtensions::default())
     }
 
     /// Create a new session, as in `new_session`, but provide native context extensions.
     pub fn new_session_with_extensions<'r>(
         &self,
-        remote: &'r impl MoveResolver<PartialVMError>,
+        remote: &'r impl MoveResolver,
         native_extensions: NativeContextExtensions<'r>,
     ) -> Session<'r, '_> {
         Session {
             move_vm: self,
-            data_cache: TransactionDataCache::new(remote),
-            module_store: ModuleStorageAdapter::new(self.runtime.module_storage()),
+            data_cache: TransactionDataCache::new(
+                self.runtime
+                    .loader()
+                    .vm_config()
+                    .deserializer_config
+                    .clone(),
+                remote,
+            ),
+            module_store: LegacyModuleStorageAdapter::new(self.runtime.module_storage_v1()),
             native_extensions,
         }
     }
 
-    /// Create a new session, as in `new_session`, but provide native context extensions and custome storage for resolved modules.
-    pub fn new_session_with_extensions_and_modules<'r>(
-        &self,
-        remote: &'r impl MoveResolver<PartialVMError>,
-        module_storage: Arc<dyn ModuleStorage>,
-        native_extensions: NativeContextExtensions<'r>,
-    ) -> Session<'r, '_> {
-        Session {
-            move_vm: self,
-            data_cache: TransactionDataCache::new(remote),
-            module_store: ModuleStorageAdapter::new(module_storage),
-            native_extensions,
-        }
-    }
-
-    /// Load a module into VM's code cache
+    /// DO NOT USE THIS API!
+    ///
+    /// Existing uses of this API is to fetch metadata from compiled modules on the client
+    /// side. With loader V2 design clients can fetch it directly from the module storage.
+    #[deprecated]
     pub fn load_module(
         &self,
         module_id: &ModuleId,
-        remote: &impl MoveResolver<PartialVMError>,
+        remote: &impl MoveResolver,
     ) -> VMResult<Arc<CompiledModule>> {
-        self.runtime
-            .loader()
-            .load_module(
-                module_id,
-                &TransactionDataCache::new(remote),
-                &ModuleStorageAdapter::new(self.runtime.module_storage()),
+        match self.runtime.loader() {
+            Loader::V1(loader) => {
+                let module = loader.load_module(
+                    module_id,
+                    &mut TransactionDataCache::new(
+                        self.runtime
+                            .loader()
+                            .vm_config()
+                            .deserializer_config
+                            .clone(),
+                        remote,
+                    ),
+                    &LegacyModuleStorageAdapter::new(self.runtime.module_storage_v1()),
+                )?;
+                Ok(module.as_ref().deref().clone())
+            },
+            Loader::V2(_) => Err(PartialVMError::new(
+                StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR,
             )
-            .map(|arc_module| arc_module.arc_module())
+            .with_message("Loader V2 implementation never calls move_vm::load_module".to_string())
+            .finish(Location::Undefined)),
+        }
     }
 
     /// Allows the adapter to announce to the VM that the code loading cache should be considered
     /// outdated. This can happen if the adapter executed a particular code publishing transaction
     /// but decided to not commit the result to the data store. Because the code cache currently
     /// does not support deletion, the cache will, incorrectly, still contain this module.
-    /// TODO: new loader architecture
+    #[deprecated]
     pub fn mark_loader_cache_as_invalid(&self) {
-        self.runtime.loader().mark_as_invalid()
+        #[allow(deprecated)]
+        self.runtime.loader().mark_v1_as_invalid()
     }
 
     /// Returns true if the loader cache has been invalidated (either by explicit call above
     /// or by the runtime)
+    #[deprecated]
     pub fn is_loader_cache_invalidated(&self) -> bool {
-        self.runtime.loader().is_invalidated()
+        #[allow(deprecated)]
+        self.runtime.loader().is_v1_invalidated()
     }
 
     /// If the loader cache has been invalidated (either by the above call or by internal logic)
     /// flush it so it is valid again. Notice that should only be called if there are no
     /// outstanding sessions created from this VM.
+    #[deprecated]
     pub fn flush_loader_cache_if_invalidated(&self) {
         // Flush the module cache inside the VMRuntime. This code is there for a legacy reason:
         // - In the old session api that we provide, MoveVM will hold a cache for loaded module and the session will be created against that cache.
         //   Thus if an module invalidation event happens (e.g, by upgrade request), we will need to flush this internal cache as well.
         // - If we can deprecate this session api, we will be able to get rid of this internal loaded cache and make the MoveVM "stateless" and
         //   invulnerable to module invalidation.
-        if self.runtime.loader().is_invalidated() {
+        #[allow(deprecated)]
+        if self.runtime.loader().is_v1_invalidated() {
             self.runtime.module_cache.flush();
         };
-        self.runtime.loader().flush_if_invalidated()
+        #[allow(deprecated)]
+        self.runtime.loader().flush_v1_if_invalidated()
     }
 
-    /// Attempts to discover metadata in a given module with given key. Availability
-    /// of this data may depend on multiple aspects. In general, no hard assumptions of
-    /// availability should be made, but typically, one can expect that
-    /// the modules which have been involved in the execution of the last session are available.
+    /// DO NOT USE THIS API!
     ///
-    /// This is called by an adapter to extract, for example, debug information out of
-    /// the metadata section of the code for post mortem analysis. Notice that because
-    /// of ownership of the underlying binary representation of modules hidden behind an rwlock,
-    /// this actually has to hand back a copy of the associated metadata, so metadata should
-    /// be organized keeping this in mind.
-    ///
-    /// TODO: in the new loader architecture, as the loader is visible to the adapter, one would
-    ///   call this directly via the loader instead of the VM.
+    /// Currently, metadata is owned by module which is owned by the VM. In the new loader
+    /// V2 design, clients can fetch metadata and apply this function directly!
+    #[deprecated]
     pub fn with_module_metadata<T, F>(&self, module: &ModuleId, f: F) -> Option<T>
     where
         F: FnOnce(&[Metadata]) -> Option<T>,
     {
-        f(&self
-            .runtime
-            .module_cache
-            .fetch_module(module)?
-            .module()
-            .metadata)
+        f(&self.runtime.module_cache.fetch_module(module)?.metadata)
     }
 }

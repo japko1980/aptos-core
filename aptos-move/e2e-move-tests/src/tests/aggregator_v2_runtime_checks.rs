@@ -43,7 +43,7 @@ fn run_entry_functions<F: Fn(ExecutionStatus)>(func_names: Vec<&str>, check_stat
         vec![
             FeatureFlag::AGGREGATOR_V2_API,
             FeatureFlag::AGGREGATOR_V2_DELAYED_FIELDS,
-            FeatureFlag::RESOURCE_GROUPS_CHARGE_AS_SIZE_SUM,
+            FeatureFlag::RESOURCE_GROUPS_SPLIT_IN_VM_CHANGE_SET,
         ],
         vec![],
     );
@@ -98,6 +98,21 @@ fn test_serialization() {
             code: NFE_BCS_SERIALIZATION_FAILURE,
             info: None,
         });
+    });
+}
+
+#[test]
+fn test_serialized_size() {
+    let func_names = vec![
+        "0x1::runtime_checks::test_serialized_size_with_aggregators",
+        "0x1::runtime_checks::test_serialized_size_with_snapshots",
+        "0x1::runtime_checks::test_serialized_size_with_derived_string_snapshots",
+    ];
+
+    // Serialized size of delayed values is deterministic and fixed, so running
+    // these functions should succeed, unlike regular serialization.
+    run_entry_functions(func_names, |status: ExecutionStatus| {
+        assert_eq!(status, ExecutionStatus::Success);
     });
 }
 

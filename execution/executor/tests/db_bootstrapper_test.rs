@@ -15,33 +15,32 @@ use aptos_executor_test_helpers::{
     bootstrap_genesis, gen_ledger_info_with_sigs, get_test_signed_transaction,
 };
 use aptos_executor_types::BlockExecutorTrait;
-use aptos_storage_interface::{state_view::LatestDbStateCheckpointView, DbReaderWriter};
+use aptos_storage_interface::{
+    state_store::state_view::db_state_view::LatestDbStateCheckpointView, DbReaderWriter,
+};
 use aptos_temppath::TempPath;
 use aptos_types::{
-    access_path::AccessPath,
     account_address::AccountAddress,
     account_config::{
         aptos_test_root_address, new_block_event_key, CoinStoreResource, NewBlockEvent,
-        CORE_CODE_ADDRESS,
+        NEW_EPOCH_EVENT_V2_MOVE_TYPE_TAG,
     },
-    account_view::AccountView,
     contract_event::ContractEvent,
     event::EventHandle,
-    on_chain_config::{access_path_for_config, ConfigurationResource, OnChainConfig, ValidatorSet},
-    state_store::{account_with_state_view::AsAccountWithStateView, state_key::StateKey},
+    on_chain_config::{ConfigurationResource, OnChainConfig, ValidatorSet},
+    state_store::{state_key::StateKey, MoveResourceExt},
     test_helpers::transaction_test_helpers::{block, TEST_BLOCK_EXECUTOR_ONCHAIN_CONFIG},
     transaction::{authenticator::AuthenticationKey, ChangeSet, Transaction, WriteSetPayload},
     trusted_state::TrustedState,
     validator_signer::ValidatorSigner,
     waypoint::Waypoint,
     write_set::{WriteOp, WriteSetMut},
+    AptosCoinType,
 };
-use aptos_vm::AptosVM;
-use move_core_types::{
-    language_storage::TypeTag,
-    move_resource::{MoveResource, MoveStructType},
-};
+use aptos_vm::aptos_vm::AptosVMBlockExecutor;
+use move_core_types::{language_storage::TypeTag, move_resource::MoveStructType};
 use rand::SeedableRng;
+use std::sync::Arc;
 
 #[test]
 fn test_empty_db() {
@@ -57,8 +56,9 @@ fn test_empty_db() {
         .is_none());
 
     // Bootstrap empty DB.
-    let waypoint = generate_waypoint::<AptosVM>(&db_rw, &genesis_txn).expect("Should not fail.");
-    maybe_bootstrap::<AptosVM>(&db_rw, &genesis_txn, waypoint).unwrap();
+    let waypoint =
+        generate_waypoint::<AptosVMBlockExecutor>(&db_rw, &genesis_txn).expect("Should not fail.");
+    maybe_bootstrap::<AptosVMBlockExecutor>(&db_rw, &genesis_txn, waypoint).unwrap();
     let ledger_info = db_rw.reader.get_latest_ledger_info().unwrap();
     assert_eq!(
         Waypoint::new_epoch_boundary(ledger_info.ledger_info()).unwrap(),
@@ -74,9 +74,11 @@ fn test_empty_db() {
     assert!(trusted_state_change.is_epoch_change());
 
     // `maybe_bootstrap()` does nothing on non-empty DB.
-    assert!(maybe_bootstrap::<AptosVM>(&db_rw, &genesis_txn, waypoint)
-        .unwrap()
-        .is_none());
+    assert!(
+        maybe_bootstrap::<AptosVMBlockExecutor>(&db_rw, &genesis_txn, waypoint)
+            .unwrap()
+            .is_none()
+    );
 }
 
 fn execute_and_commit(txns: Vec<Transaction>, db: &DbReaderWriter, signer: &ValidatorSigner) {
@@ -85,7 +87,7 @@ fn execute_and_commit(txns: Vec<Transaction>, db: &DbReaderWriter, signer: &Vali
     let version = li.ledger_info().version();
     let epoch = li.ledger_info().next_block_epoch();
     let target_version = version + txns.len() as u64 + 1; // Due to StateCheckpoint txn
-    let executor = BlockExecutor::<AptosVM>::new(db.clone());
+    let executor = BlockExecutor::<AptosVMBlockExecutor>::new(db.clone());
     let output = executor
         .execute_block(
             (block_id, block(txns)).into(),
@@ -93,7 +95,7 @@ fn execute_and_commit(txns: Vec<Transaction>, db: &DbReaderWriter, signer: &Vali
             TEST_BLOCK_EXECUTOR_ONCHAIN_CONFIG,
         )
         .unwrap();
-    assert_eq!(output.num_leaves(), target_version + 1);
+    assert_eq!(output.next_version(), target_version + 1);
     let ledger_info_with_sigs =
         gen_ledger_info_with_sigs(epoch, &output, block_id, &[signer.clone()]);
     executor
@@ -172,9 +174,7 @@ fn get_aptos_coin_transfer_transaction(
 
 fn get_balance(account: &AccountAddress, db: &DbReaderWriter) -> u64 {
     let db_state_view = db.reader.latest_state_checkpoint_view().unwrap();
-    let account_state_view = db_state_view.as_account_with_state_view(account);
-    account_state_view
-        .get_coin_store_resource()
+    CoinStoreResource::<AptosCoinType>::fetch_move_resource(&db_state_view, account)
         .unwrap()
         .unwrap()
         .coin()
@@ -182,12 +182,7 @@ fn get_balance(account: &AccountAddress, db: &DbReaderWriter) -> u64 {
 
 fn get_configuration(db: &DbReaderWriter) -> ConfigurationResource {
     let db_state_view = db.reader.latest_state_checkpoint_view().unwrap();
-    let aptos_framework_account_state_view =
-        db_state_view.as_account_with_state_view(&CORE_CODE_ADDRESS);
-    aptos_framework_account_state_view
-        .get_configuration_resource()
-        .unwrap()
-        .unwrap()
+    ConfigurationResource::fetch_config(&db_state_view).unwrap()
 }
 
 #[test]
@@ -199,10 +194,10 @@ fn test_new_genesis() {
     // Create bootstrapped DB.
     let tmp_dir = TempPath::new();
     let db = DbReaderWriter::new(AptosDB::new_for_test(&tmp_dir));
-    let waypoint = bootstrap_genesis::<AptosVM>(&db, &genesis_txn).unwrap();
+    let waypoint = bootstrap_genesis::<AptosVMBlockExecutor>(&db, &genesis_txn).unwrap();
     let signer = ValidatorSigner::new(
         genesis.1[0].data.owner_address,
-        genesis.1[0].consensus_key.clone(),
+        Arc::new(genesis.1[0].consensus_key.clone()),
     );
 
     // Mint for 2 demo accounts.
@@ -225,18 +220,13 @@ fn test_new_genesis() {
     let genesis_txn = Transaction::GenesisTransaction(WriteSetPayload::Direct(ChangeSet::new(
         WriteSetMut::new(vec![
             (
-                StateKey::access_path(
-                    access_path_for_config(ValidatorSet::CONFIG_ID).expect("access path in test"),
-                ),
+                StateKey::on_chain_config::<ValidatorSet>().unwrap(),
                 WriteOp::legacy_modification(
                     bcs::to_bytes(&ValidatorSet::new(vec![])).unwrap().into(),
                 ),
             ),
             (
-                StateKey::access_path(AccessPath::new(
-                    CORE_CODE_ADDRESS,
-                    ConfigurationResource::resource_path(),
-                )),
+                StateKey::on_chain_config::<ConfigurationResource>().unwrap(),
                 WriteOp::legacy_modification(
                     bcs::to_bytes(&configuration.bump_epoch_for_test())
                         .unwrap()
@@ -244,12 +234,9 @@ fn test_new_genesis() {
                 ),
             ),
             (
-                StateKey::access_path(AccessPath::new(
-                    account1,
-                    CoinStoreResource::resource_path(),
-                )),
+                StateKey::resource_typed::<CoinStoreResource<AptosCoinType>>(&account1).unwrap(),
                 WriteOp::legacy_modification(
-                    bcs::to_bytes(&CoinStoreResource::new(
+                    bcs::to_bytes(&CoinStoreResource::<AptosCoinType>::new(
                         100_000_000,
                         false,
                         EventHandle::random(0),
@@ -263,14 +250,7 @@ fn test_new_genesis() {
         .freeze()
         .unwrap(),
         vec![
-            ContractEvent::new_v1(
-                *configuration.events().key(),
-                0,
-                TypeTag::Struct(Box::new(
-                    <ConfigurationResource as MoveStructType>::struct_tag(),
-                )),
-                vec![],
-            ),
+            ContractEvent::new_v2(NEW_EPOCH_EVENT_V2_MOVE_TYPE_TAG.clone(), vec![]),
             ContractEvent::new_v1(
                 new_block_event_key(),
                 0,
@@ -281,10 +261,12 @@ fn test_new_genesis() {
     )));
 
     // Bootstrap DB into new genesis.
-    let waypoint = generate_waypoint::<AptosVM>(&db, &genesis_txn).unwrap();
-    assert!(maybe_bootstrap::<AptosVM>(&db, &genesis_txn, waypoint)
-        .unwrap()
-        .is_some());
+    let waypoint = generate_waypoint::<AptosVMBlockExecutor>(&db, &genesis_txn).unwrap();
+    assert!(
+        maybe_bootstrap::<AptosVMBlockExecutor>(&db, &genesis_txn, waypoint)
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(waypoint.version(), 6);
 
     // Client bootable from waypoint.

@@ -1,14 +1,19 @@
 // Copyright © Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{Context, Ok, Result};
+use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
+use aptos_system_utils::profiling::start_cpu_profiling;
 use backtrace::Backtrace;
 use clap::Parser;
 use prometheus::{Encoder, TextEncoder};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+#[cfg(target_os = "linux")]
+use std::convert::Infallible;
 use std::{fs::File, io::Read, panic::PanicInfo, path::PathBuf, process};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
-use warp::{http::Response, Filter};
+use warp::{http::Response, reply::Reply, Filter};
 
 /// ServerArgs bootstraps a server with all common pieces. And then triggers the run method for
 /// the specific service.
@@ -40,9 +45,10 @@ where
 {
     let health_port = config.health_check_port;
     // Start liveness and readiness probes.
+    let config_clone = config.clone();
     let task_handler = tokio::spawn(async move {
-        register_probes_and_metrics_handler(health_port).await;
-        Ok(())
+        register_probes_and_metrics_handler(config_clone, health_port).await;
+        anyhow::Ok(())
     });
     let main_task_handler =
         tokio::spawn(async move { config.run().await.expect("task should exit with Ok.") });
@@ -66,7 +72,7 @@ where
     }
 }
 
-#[derive(Deserialize, Debug, Serialize)]
+#[derive(Deserialize, Clone, Debug, Serialize)]
 pub struct GenericConfig<T> {
     // Shared configuration among all services.
     pub health_check_port: u16,
@@ -91,11 +97,15 @@ where
     fn get_server_name(&self) -> String {
         self.server_config.get_server_name()
     }
+
+    async fn status_page(&self) -> Result<warp::reply::Response, warp::Rejection> {
+        self.server_config.status_page().await
+    }
 }
 
 /// RunnableConfig is a trait that all services must implement for their configuration.
 #[async_trait::async_trait]
-pub trait RunnableConfig: DeserializeOwned + Send + Sync + 'static {
+pub trait RunnableConfig: Clone + DeserializeOwned + Send + Sync + 'static {
     // Validate the config.
     fn validate(&self) -> Result<()> {
         Ok(())
@@ -106,6 +116,10 @@ pub trait RunnableConfig: DeserializeOwned + Send + Sync + 'static {
 
     // Get the server name.
     fn get_server_name(&self) -> String;
+
+    async fn status_page(&self) -> Result<warp::reply::Response, warp::Rejection> {
+        Ok("Status page is not found.".into_response())
+    }
 }
 
 /// Parse a yaml file into a struct.
@@ -161,6 +175,7 @@ pub fn setup_logging(make_writer: Option<Box<dyn Fn() -> Box<dyn std::io::Write>
 
     let subscriber = tracing_subscriber::fmt()
         .json()
+        .flatten_event(true)
         .with_file(true)
         .with_line_number(true)
         .with_thread_ids(true)
@@ -175,9 +190,13 @@ pub fn setup_logging(make_writer: Option<Box<dyn Fn() -> Box<dyn std::io::Write>
 }
 
 /// Register readiness and liveness probes and set up metrics endpoint.
-async fn register_probes_and_metrics_handler(port: u16) {
+async fn register_probes_and_metrics_handler<C>(config: GenericConfig<C>, port: u16)
+where
+    C: RunnableConfig,
+{
     let readiness = warp::path("readiness")
         .map(move || warp::reply::with_status("ready", warp::http::StatusCode::OK));
+
     let metrics_endpoint = warp::path("metrics").map(|| {
         // Metrics encoding.
         let metrics = aptos_metrics_core::gather();
@@ -193,9 +212,52 @@ async fn register_probes_and_metrics_handler(port: u16) {
             .header("Content-Type", "text/plain")
             .body(encode_buffer)
     });
-    warp::serve(readiness.or(metrics_endpoint))
+
+    let status_endpoint = warp::path::end().and_then(move || {
+        let config = config.clone();
+        async move { config.status_page().await }
+    });
+
+    if cfg!(target_os = "linux") {
+        #[cfg(target_os = "linux")]
+        let profilez = warp::path("profilez").and_then(|| async move {
+            // TODO(grao): Consider make the parameters configurable.
+            Ok::<_, Infallible>(match start_cpu_profiling(10, 99, false).await {
+                Ok(body) => {
+                    let response = Response::builder()
+                        .header("Content-Length", body.len())
+                        .header("Content-Disposition", "inline")
+                        .header("Content-Type", "image/svg+xml")
+                        .body(body);
+
+                    match response {
+                        Ok(res) => warp::reply::with_status(res, warp::http::StatusCode::OK),
+                        Err(e) => warp::reply::with_status(
+                            Response::new(format!("Profiling failed: {e:?}.").as_bytes().to_vec()),
+                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        ),
+                    }
+                },
+                Err(e) => warp::reply::with_status(
+                    Response::new(format!("Profiling failed: {e:?}.").as_bytes().to_vec()),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+            })
+        });
+        #[cfg(target_os = "linux")]
+        warp::serve(
+            readiness
+                .or(metrics_endpoint)
+                .or(status_endpoint)
+                .or(profilez),
+        )
         .run(([0, 0, 0, 0], port))
         .await;
+    } else {
+        warp::serve(readiness.or(metrics_endpoint).or(status_endpoint))
+            .run(([0, 0, 0, 0], port))
+            .await;
+    }
 }
 
 #[cfg(test)]

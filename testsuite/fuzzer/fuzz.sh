@@ -2,9 +2,12 @@
 
 export RUSTFLAGS="${RUSTFLAGS} --cfg tokio_unstable"
 export EXTRAFLAGS="-Ztarget-applies-to-host -Zhost-config"
+# Nightly version control
+# Pin nightly-2024-02-12 because of https://github.com/google/oss-fuzz/issues/11626
+NIGHTLY_VERSION="nightly-2024-04-06"
 
 # GDRIVE format https://docs.google.com/uc?export=download&id=DOCID
-CORPUS_ZIPS=("https://storage.googleapis.com/aptos-core-corpora/move_aptosvm_publish_and_run_seed_corpus.zip")
+CORPUS_ZIPS=("https://storage.googleapis.com/aptos-core-corpora/move_aptosvm_publish_and_run_seed_corpus.zip" "https://storage.googleapis.com/aptos-core-corpora/move_aptosvm_publish_seed_corpus.zip")
 
 function info() {
     echo "[info] $1"
@@ -16,15 +19,23 @@ function error() {
 }
 
 function cargo_fuzz() {
-    # Nightly version control
-    NIGHTLY_VERSION="nightly-2024-01-01"
     rustup install $NIGHTLY_VERSION
     if [ -z "$1" ]; then
         error "error using cargo()"
     fi
-    cargo_fuzz_cmd="cargo "+$NIGHTLY_VERSION-x86_64-unknown-linux-gnu" fuzz $1"
+    cargo_fuzz_cmd="cargo "+$NIGHTLY_VERSION" fuzz $1"
     shift
     $cargo_fuzz_cmd $EXTRAFLAGS $@
+}
+
+function cargo_local() {
+    rustup install $NIGHTLY_VERSION
+    if [ -z "$1" ]; then
+        error "error using cargo()"
+    fi
+    cargo_cmd="cargo "+$NIGHTLY_VERSION" $1"
+    shift
+    $cargo_cmd $EXTRAFLAGS $@
 }
 
 function usage() {
@@ -32,12 +43,25 @@ function usage() {
         "add")
             echo "Usage: $0 add <fuzz_target>"
             ;;
+        "block-builder")
+            #echo "Usage: $0 block-builder <command> [argumetns]"
+            cargo_local run --quiet -- --help
+            ;;
         "build")
             echo "Usage: $0 build <fuzz_target|all> [target_dir]"
             ;;
         "build-oss-fuzz")
             echo "Usage: $0 build-oss-fuzz <target_dir>"
             ;;
+        "cmin")
+            echo "Usage: $0 cmin <fuzz_target> [corpus_dir]"
+            ;;
+        "coverage")
+            echo "Usage: $0 coverage <fuzz_target>"
+            ;;
+        "clean-coverage")
+            echo "Usage: $0 clean-coverage <fuzz_target>"
+            ;;        
         "debug")
             echo "Usage: $0 debug <fuzz_target> <testcase>"
             ;;
@@ -54,10 +78,14 @@ function usage() {
             echo "Usage: $0 test"
             ;;
         *)
-            echo "Usage: $0 <build|build-oss-fuzz|list|run|debug|test>"
+            echo "Usage: $0 <add|block-builder|build|build-oss-fuzz|coverage|clean-coverage|flamegraph|list|run|debug|test>"
             echo "    add               adds a new fuzz target"
+            echo "    block-builder     runs rust tool to hel build fuzzers"
             echo "    build             builds fuzz targets"
             echo "    build-oss-fuzz    builds fuzz targets for oss-fuzz"
+            echo "    cmin              minimizes a corpus for a target"
+            echo "    coverage          generates coverage for a fuzz target"
+            echo "    clean-coverage    clean coverage for a fuzz target"
             echo "    debug             debugs a fuzz target with a testcase"
             echo "    flamegraph        generates a flamegraph for a fuzz target with a testcase"
             echo "    list              lists existing fuzz targets"
@@ -66,6 +94,16 @@ function usage() {
             ;;
     esac
     exit 1
+}
+
+function block-builder() {
+    if [ -z "$1" ]; then
+        usage block-builder
+    fi
+    command=$1
+    shift
+    cargo_local run --quiet -- $command $@
+    exit 0
 }
 
 function build() {
@@ -108,10 +146,22 @@ function build-oss-fuzz() {
     export CXXFLAGS_EXTRA="-stdlib=libc++"
     export CXXFLAGS="$CFLAGS $CXXFLAGS_EXTRA"
 
-    if ! build all ./target; then
-        env
-        error "Build failed. Exiting."
-    fi
+    # component versions good to have in logs
+    ld.lld --version
+    clang --version
+
+    # Limit the number of parallel jobs to avoid OOM
+    # export CARGO_BUILD_JOBS = 3
+
+    # Build the fuzz targets
+    # Doing one target at the time should prevent OOM, but use all thread while bulding dependecies
+    for fuzz_target in $(list); do
+        if ! build $fuzz_target ./target ; then
+            env
+            error "Build failed. Exiting."
+        fi
+    done
+
     find ./target/*/release/ -maxdepth 1 -type f -perm /111 -exec cp {} $oss_fuzz_out \;
 
     # Download corpus zip
@@ -120,24 +170,83 @@ function build-oss-fuzz() {
     done
 }
 
+function cmin() {
+    if [ -z "$1" ]; then
+        usage cmin
+    fi
+    fuzz_target=$1
+    corpus_dir=${2:-./fuzz/corpus/$fuzz_target}
+    cargo_fuzz cmin $fuzz_target $corpus_dir
+}
+
+function install-coverage-tools() {
+     cargo +$NIGHTLY_VERSION install cargo-binutils
+     cargo +$NIGHTLY_VERSION install rustfilt
+}
+
+function coverage() {
+    if [ -z "$1" ]; then
+        usage coverage
+    fi
+    fuzz_target=$1
+
+    if ! cargo +$NIGHTLY_VERSION cov -V &> /dev/null; then
+        install-coverage-tools
+    fi
+
+    clean-coverage $fuzz_target
+    local corpus_dir="fuzz/corpus/$fuzz_target"
+    local coverage_dir="./fuzz/coverage/$fuzz_target/report"
+    mkdir -p $coverage_dir
+    
+    if [ ! -d "fuzz/coverage/$fuzz_target/raw" ]; then
+        cargo_fuzz coverage $fuzz_target $corpus_dir
+    fi
+    
+    info "Generating coverage for $fuzz_target"
+
+    fuzz_target_bin=$(find ./target/*/coverage -name $fuzz_target -type f -perm /111) #$(find target/*/coverage -name $fuzz_target -type f)
+    echo "Found fuzz target binary: $fuzz_target_bin"
+    # Generate the coverage report
+    cargo +$NIGHTLY_VERSION cov -- show $fuzz_target_bin \
+        --format=html \
+        --instr-profile=fuzz/coverage/$fuzz_target/coverage.profdata \
+        --show-directory-coverage \
+        --output-dir=$coverage_dir \
+        -Xdemangler=rustfilt \
+        --show-branches=count \
+        --ignore-filename-regex='rustc/.*/library|\.cargo'
+}
+
+function clean-coverage() {
+    if [ "$#" -ne 1 ]; then
+        usage clean
+    fi
+
+    local fuzz_target="$1"
+    if [ "$fuzz_target" == "all" ]; then
+        rm -rf ./fuzz/coverage
+    else
+        local coverage_dir="./fuzz/coverage/$fuzz_target/"
+        rm -rf $coverage_dir
+    fi
+}
+
 # use rust-gdb to debug a fuzz target with a testcase
 function debug() {
-    if [ -z "$1" ]; then
+    if [ -z "$2" ]; then
         usage debug
     fi
     fuzz_target=$1
     testcase=$2
-    if [ -z "$testcase" ]; then
-        error "No testcase provided"
-    fi
     if [ ! -f "$testcase" ]; then
         error "$testcase does not exist"
     fi
     info "Debugging $fuzz_target with $testcase"
     # find the binary
-    binary=$(find ./target -name $fuzz_target -type f -executable)
+    binary=$(find ./target -name $fuzz_target -type f -perm /111)
     if [ -z "$binary" ]; then
-        error "Could not find binary for $fuzz_target"
+        error "Could not find binary for $fuzz_target. Run `./fuzz.sh build $fuzz_target` first"
     fi
     # run the binary with rust-gdb
     export LSAN_OPTIONS=verbosity=1:log_threads=1
@@ -147,26 +256,18 @@ function debug() {
 
 # use cargo-flamegraph to generate a flamegraph for a fuzz target with a testcase
 function flamegraph() {
-    if [ -z "$1" ]; then
+    if [ -z "$2" ]; then
         usage flamegraph
     fi
     fuzz_target=$1
     testcase=$2
-    if [ -z "$testcase" ]; then
-        error "No testcase provided"
-    fi
     if [ ! -f "$testcase" ]; then
         error "$testcase does not exist"
     fi
     info "Generating flamegraph for $fuzz_target with $testcase"
-    # find the binary
-    binary=$(find ./target -name $fuzz_target -type f -executable)
-    if [ -z "$binary" ]; then
-        error "Could not find binary for $fuzz_target"
-    fi
     # run the binary with cargo-flamegraph
     time=$(date +%s)
-    cargo flamegraph -o "${fuzz_target}_${time}.svg" --bin "$binary" "$testcase -- -runs=1"
+    cargo flamegraph -o "${fuzz_target}_${time}.svg" --root -p="fuzzer-fuzz" --bin="$fuzz_target" -- "$testcase" "-- -runs=1"
 }
 
 function run() {
@@ -183,7 +284,7 @@ function run() {
         fi
     fi
     info "Running $fuzz_target"
-    cargo_fuzz run $fuzz_target $testcase
+    cargo_fuzz run --sanitizer address -O $fuzz_target $testcase -- -fork=15 #-ignore_crashes=1
 }
 
 function test() {
@@ -215,23 +316,7 @@ function add() {
             echo "path = \"$fuzz_target_path\""
             echo "test = false"
             echo "doc = false"
-        } >> $fuzz_path/Cargo.toml
-        info "Fuzzing target '$fuzz_target' added successfully at $fuzz_target_path."
-    else
-        error "Failed to create directory or file for fuzzing target."
-    fi
-
-    mkdir -p fuzz/fuzz_targets/$(dirname $fuzz_target_path) && touch fuzz/fuzz_targets/$fuzz_target_path
-
-    if [ $? -eq 0 ]; then
-        {
-            echo ""
-            echo "[[bin]]"
-            echo "name = \"$fuzz_target\""
-            echo "path = \"$fuzz_target_path\""
-            echo "test = false"
-            echo "doc = false"
-        } >> $fuzz_path/Cargo.toml
+        } >> fuzz/Cargo.toml
         info "Fuzzing target '$fuzz_target' added successfully at $fuzz_target_path."
     else
         error "Failed to create directory or file for fuzzing target."
@@ -256,6 +341,10 @@ case "$1" in
     shift
     add "$@"
     ;;
+  "block-builder")
+    shift
+    block-builder "$@"
+    ;;
   "build")
     shift
     build "$@"
@@ -263,6 +352,18 @@ case "$1" in
   "build-oss-fuzz")
     shift
     build-oss-fuzz "$@"
+    ;;
+  "cmin")
+    shift
+    cmin "$@"
+    ;;
+  "coverage")
+    shift
+    coverage "$@"
+    ;;
+  "clean-coverage")
+    shift
+    clean-coverage "$@"
     ;;
   "debug")
     shift

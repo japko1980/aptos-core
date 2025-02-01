@@ -6,7 +6,7 @@
   "state_checkpoint_hash": null,
   "gas_used": "3",
   "success": false,
-  "vm_status": "Transaction Executed and Committed with Error LINKER_ERROR",
+  "vm_status": "LINKER_ERROR",
   "accumulator_root_hash": "",
   "changes": [
     {
@@ -17,7 +17,7 @@
         "data": {
           "authentication_key": "0xcef8ffd1ab9017e96132df8a56b22de39a8155e1c3fc32affbbf93eb624b532a",
           "coin_register_events": {
-            "counter": "1",
+            "counter": "0",
             "guid": {
               "id": {
                 "addr": "0xa550c18",

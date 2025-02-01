@@ -3,6 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use codespan_reporting::{
+    diagnostic::Severity,
+    term::termcolor::{ColorChoice, StandardStream},
+};
 use evm::{backend::MemoryVicinity, ExitReason};
 use evm_exec_utils::{compile, exec::Executor};
 use move_compiler::{
@@ -50,7 +54,6 @@ fn compile_yul_to_bytecode_bytes(filename: &str) -> Result<Vec<u8>> {
     let deps = vec![
         path_from_crate_root("../stdlib/sources"),
         path_from_crate_root("../../move-stdlib/sources"),
-        path_from_crate_root("../../extensions/async/move-async-lib/sources"),
     ];
     let mut named_address_map = move_stdlib_named_addresses();
     named_address_map.insert(
@@ -61,10 +64,6 @@ fn compile_yul_to_bytecode_bytes(filename: &str) -> Result<Vec<u8>> {
         "Evm".to_string(),
         NumericalAddress::parse_str("0x2").unwrap(),
     );
-    named_address_map.insert(
-        "Async".to_string(),
-        NumericalAddress::parse_str("0x1").unwrap(),
-    );
     let flags = Flags::verification().set_flavor("evm");
     let known_attributes = get_known_attributes_for_flavor(&flags);
     let env = run_model_builder_with_options_and_compilation_flags(
@@ -73,6 +72,7 @@ fn compile_yul_to_bytecode_bytes(filename: &str) -> Result<Vec<u8>> {
             paths: vec![contract_path(filename).to_string_lossy().to_string()],
             named_address_map: named_address_map.clone(),
         }],
+        vec![],
         vec![PackagePaths {
             name: None,
             paths: deps,
@@ -82,6 +82,11 @@ fn compile_yul_to_bytecode_bytes(filename: &str) -> Result<Vec<u8>> {
         flags,
         &known_attributes,
     )?;
+    if env.has_errors() {
+        let mut error_writer = StandardStream::stderr(ColorChoice::Auto);
+        env.report_diag(&mut error_writer, Severity::Warning);
+        panic!("compilation failed");
+    }
     let options = Options::default();
     let (_, out, _) = Generator::run(&options, &env)
         .pop()

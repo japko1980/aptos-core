@@ -2,6 +2,18 @@
 name = "fuzzer"
 version = "0.1.0"
 edition = "2021"
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = { workspace = true }
 
 [dependencies]
+aptos-framework = { workspace = true }
+aptos-types = { workspace = true }
+arbitrary = { workspace = true }
+base64 = "0.21.7"
+bcs = { workspace = true }
+clap = { workspace = true }
+csv = { workspace = true }
+dearbitrary = { workspace = true }
+hex = { workspace = true }
+move-binary-format = { workspace = true, features = ["fuzzing"] }
+move-core-types = { workspace = true, features = ["fuzzing"] }
+sha2 = { workspace = true }

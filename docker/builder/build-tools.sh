@@ -18,6 +18,7 @@ cargo build --locked --profile=$PROFILE \
     -p aptos-node-checker \
     -p aptos-openapi-spec-generator \
     -p aptos-telemetry-service \
+    -p aptos-keyless-pepper-service \
     -p aptos-debugger \
     -p aptos-transaction-emitter \
     -p aptos-api-tester \
@@ -30,6 +31,7 @@ BINS=(
     aptos-node-checker
     aptos-openapi-spec-generator
     aptos-telemetry-service
+    aptos-keyless-pepper-service
     aptos-fn-check-client
     aptos-debugger
     aptos-transaction-emitter
@@ -43,5 +45,6 @@ for BIN in "${BINS[@]}"; do
 done
 
 # Build the Aptos Move framework and place it in dist. It can be found afterwards in the current directory.
+echo "MOVE_COMPILER_V2: ${MOVE_COMPILER_V2:-not set}"
 echo "Building the Aptos Move framework..."
 (cd dist && cargo run --locked --profile=$PROFILE --package aptos-framework -- release)

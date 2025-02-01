@@ -4,8 +4,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    common::NUM_STATE_SHARDS,
-    ledger_db::{LedgerDb, LedgerDbSchemaBatches},
+    ledger_db::{ledger_metadata_db::LedgerMetadataDb, LedgerDb, LedgerDbSchemaBatches},
     schema::{
         db_metadata::{DbMetadataKey, DbMetadataSchema, DbMetadataValue},
         epoch_by_version::EpochByVersionSchema,
@@ -14,9 +13,12 @@ use crate::{
         stale_node_index::StaleNodeIndexSchema,
         stale_node_index_cross_epoch::StaleNodeIndexCrossEpochSchema,
         stale_state_value_index::StaleStateValueIndexSchema,
+        stale_state_value_index_by_key_hash::StaleStateValueIndexByKeyHashSchema,
         state_value::StateValueSchema,
+        state_value_by_key_hash::StateValueByKeyHashSchema,
         transaction::TransactionSchema,
         transaction_accumulator::TransactionAccumulatorSchema,
+        transaction_accumulator_root_hash::TransactionAccumulatorRootHashSchema,
         transaction_info::TransactionInfoSchema,
         version_data::VersionDataSchema,
         write_set::WriteSetSchema,
@@ -30,12 +32,13 @@ use crate::{
 use aptos_jellyfish_merkle::{node_type::NodeKey, StaleNodeIndex};
 use aptos_logger::info;
 use aptos_schemadb::{
+    batch::SchemaBatch,
     schema::{Schema, SeekKeyCodec},
-    ReadOptions, SchemaBatch, DB,
+    DB,
 };
 use aptos_storage_interface::Result;
 use aptos_types::{proof::position::Position, transaction::Version};
-use claims::{assert_ge, assert_lt};
+use claims::assert_ge;
 use rayon::prelude::*;
 use status_line::StatusLine;
 use std::{
@@ -76,20 +79,32 @@ pub(crate) fn truncate_state_kv_db(
     target_version: Version,
     batch_size: usize,
 ) -> Result<()> {
-    let status = StatusLine::new(Progress::new(target_version));
+    assert!(batch_size > 0);
+    let status = StatusLine::new(Progress::new("Truncating State KV DB", target_version));
+    status.set_current_version(current_version);
 
     let mut current_version = current_version;
-    while current_version > target_version {
-        let target_version_for_this_batch =
-            std::cmp::max(current_version - batch_size as u64, target_version);
+    // current_version can be the same with target_version while there is data written to the db before
+    // the progress is recorded -- we need to run the truncate for at least one batch
+    loop {
+        let target_version_for_this_batch = std::cmp::max(
+            current_version.saturating_sub(batch_size as Version),
+            target_version,
+        );
+        // By writing the progress first, we still maintain that it is less than or equal to the
+        // actual progress per shard, even if it dies in the middle of truncation.
         state_kv_db.write_progress(target_version_for_this_batch)?;
-        truncate_state_kv_db_shards(
-            state_kv_db,
-            target_version_for_this_batch,
-            Some(current_version),
-        )?;
+        // the first batch can actually delete more versions than the target batch size because
+        // we calculate the start version of this batch assuming the latest data is at
+        // `current_version`. Otherwise, we need to seek all shards to determine the
+        // actual latest version of data.
+        truncate_state_kv_db_shards(state_kv_db, target_version_for_this_batch)?;
         current_version = target_version_for_this_batch;
         status.set_current_version(current_version);
+
+        if current_version <= target_version {
+            break;
+        }
     }
     assert_eq!(current_version, target_version);
     Ok(())
@@ -98,17 +113,11 @@ pub(crate) fn truncate_state_kv_db(
 pub(crate) fn truncate_state_kv_db_shards(
     state_kv_db: &StateKvDb,
     target_version: Version,
-    expected_current_version: Option<Version>,
 ) -> Result<()> {
-    (0..NUM_STATE_SHARDS)
+    (0..state_kv_db.hack_num_real_shards())
         .into_par_iter()
         .try_for_each(|shard_id| {
-            truncate_state_kv_db_single_shard(
-                state_kv_db,
-                shard_id as u8,
-                target_version,
-                expected_current_version,
-            )
+            truncate_state_kv_db_single_shard(state_kv_db, shard_id as u8, target_version)
         })
 }
 
@@ -116,14 +125,13 @@ pub(crate) fn truncate_state_kv_db_single_shard(
     state_kv_db: &StateKvDb,
     shard_id: u8,
     target_version: Version,
-    expected_current_version: Option<Version>,
 ) -> Result<()> {
-    let batch = SchemaBatch::new();
+    let mut batch = SchemaBatch::new();
     delete_state_value_and_index(
         state_kv_db.db_shard(shard_id),
         target_version + 1,
-        expected_current_version,
-        &batch,
+        &mut batch,
+        state_kv_db.enabled_sharding(),
     )?;
     state_kv_db.commit_single_shard(target_version, shard_id, batch)
 }
@@ -132,7 +140,8 @@ pub(crate) fn truncate_state_merkle_db(
     state_merkle_db: &StateMerkleDb,
     target_version: Version,
 ) -> Result<()> {
-    let status = StatusLine::new(Progress::new(target_version));
+    let status = StatusLine::new(Progress::new("Truncating State Merkle DB.", target_version));
+
     loop {
         let current_version = get_current_version_in_state_merkle_db(state_merkle_db)?
             .expect("Current version of state merkle db must exist.");
@@ -142,16 +151,19 @@ pub(crate) fn truncate_state_merkle_db(
             break;
         }
 
-        let version_before =
-            find_closest_node_version_at_or_before(state_merkle_db, current_version - 1)?
-                .expect("Must exist.");
+        let version_before = find_closest_node_version_at_or_before(
+            state_merkle_db.metadata_db(),
+            current_version - 1,
+        )?
+        .expect("Must exist.");
 
-        let top_levels_batch = SchemaBatch::new();
+        let mut top_levels_batch = SchemaBatch::new();
 
         delete_nodes_and_stale_indices_at_or_after_version(
             state_merkle_db.metadata_db(),
             current_version,
-            &top_levels_batch,
+            None, // shard_id
+            &mut top_levels_batch,
         )?;
 
         state_merkle_db.commit_top_levels(version_before, top_levels_batch)?;
@@ -166,7 +178,7 @@ pub(crate) fn truncate_state_merkle_db_shards(
     state_merkle_db: &StateMerkleDb,
     target_version: Version,
 ) -> Result<()> {
-    (0..NUM_STATE_SHARDS)
+    (0..state_merkle_db.hack_num_real_shards())
         .into_par_iter()
         .try_for_each(|shard_id| {
             truncate_state_merkle_db_single_shard(state_merkle_db, shard_id as u8, target_version)
@@ -178,28 +190,99 @@ pub(crate) fn truncate_state_merkle_db_single_shard(
     shard_id: u8,
     target_version: Version,
 ) -> Result<()> {
-    let batch = SchemaBatch::new();
+    let mut batch = SchemaBatch::new();
     delete_nodes_and_stale_indices_at_or_after_version(
         state_merkle_db.db_shard(shard_id),
         target_version + 1,
-        &batch,
+        Some(shard_id),
+        &mut batch,
     )?;
-    state_merkle_db.commit_single_shard(target_version, shard_id, batch)
+    state_merkle_db.db_shard(shard_id).write_schemas(batch)
+}
+
+pub(crate) fn find_tree_root_at_or_before(
+    ledger_metadata_db: &LedgerMetadataDb,
+    state_merkle_db: &StateMerkleDb,
+    version: Version,
+) -> Result<Option<Version>> {
+    if let Some(closest_version) =
+        find_closest_node_version_at_or_before(state_merkle_db.metadata_db(), version)?
+    {
+        if root_exists_at_version(state_merkle_db, closest_version)? {
+            return Ok(Some(closest_version));
+        }
+
+        // It's possible that it's a partial commit when sharding is not enabled,
+        // look again for the previous version:
+        if version == 0 {
+            return Ok(None);
+        }
+        if let Some(closest_version) =
+            find_closest_node_version_at_or_before(state_merkle_db.metadata_db(), version - 1)?
+        {
+            if root_exists_at_version(state_merkle_db, closest_version)? {
+                return Ok(Some(closest_version));
+            }
+
+            // Now we are probably looking at a pruned version in this epoch, look for the previous
+            // epoch ending:
+            let mut iter = ledger_metadata_db.db().iter::<EpochByVersionSchema>()?;
+            iter.seek_for_prev(&version)?;
+            if let Some((closest_epoch_version, _)) = iter.next().transpose()? {
+                if root_exists_at_version(state_merkle_db, closest_epoch_version)? {
+                    return Ok(Some(closest_epoch_version));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+pub(crate) fn root_exists_at_version(
+    state_merkle_db: &StateMerkleDb,
+    version: Version,
+) -> Result<bool> {
+    Ok(state_merkle_db
+        .metadata_db()
+        .get::<JellyfishMerkleNodeSchema>(&NodeKey::new_empty_path(version))?
+        .is_some())
 }
 
 pub(crate) fn get_current_version_in_state_merkle_db(
     state_merkle_db: &StateMerkleDb,
 ) -> Result<Option<Version>> {
-    find_closest_node_version_at_or_before(state_merkle_db, u64::max_value())
+    find_closest_node_version_at_or_before(state_merkle_db.metadata_db(), Version::MAX)
+}
+
+pub(crate) fn get_max_version_in_state_merkle_db(
+    state_merkle_db: &StateMerkleDb,
+) -> Result<Option<Version>> {
+    let mut version = get_current_version_in_state_merkle_db(state_merkle_db)?;
+    let num_real_shards = state_merkle_db.hack_num_real_shards() as u8;
+    if num_real_shards > 1 {
+        for shard_id in 0..num_real_shards {
+            let shard_version = find_closest_node_version_at_or_before(
+                state_merkle_db.db_shard(shard_id),
+                Version::MAX,
+            )?;
+            if version.is_none() {
+                version = shard_version;
+            } else if let Some(shard_version) = shard_version {
+                if shard_version > version.unwrap() {
+                    version = Some(shard_version);
+                }
+            }
+        }
+    }
+    Ok(version)
 }
 
 pub(crate) fn find_closest_node_version_at_or_before(
-    state_merkle_db: &StateMerkleDb,
+    db: &DB,
     version: Version,
 ) -> Result<Option<Version>> {
-    let mut iter = state_merkle_db
-        .metadata_db()
-        .rev_iter::<JellyfishMerkleNodeSchema>(Default::default())?;
+    let mut iter = db.rev_iter::<JellyfishMerkleNodeSchema>()?;
     iter.seek_for_prev(&NodeKey::new_empty_path(version))?;
     Ok(iter.next().transpose()?.map(|item| item.0.version()))
 }
@@ -211,10 +294,9 @@ pub(crate) fn num_frozen_nodes_in_accumulator(num_leaves: u64) -> u64 {
 fn truncate_transaction_accumulator(
     transaction_accumulator_db: &DB,
     start_version: Version,
-    batch: &SchemaBatch,
+    batch: &mut SchemaBatch,
 ) -> Result<()> {
-    let mut iter =
-        transaction_accumulator_db.iter::<TransactionAccumulatorSchema>(ReadOptions::default())?;
+    let mut iter = transaction_accumulator_db.iter::<TransactionAccumulatorSchema>()?;
     iter.seek_to_last();
     let (position, _) = iter.next().transpose()?.unwrap();
     let num_frozen_nodes = position.to_postorder_index() + 1;
@@ -240,30 +322,30 @@ fn truncate_ledger_db_single_batch(
     transaction_store: &TransactionStore,
     start_version: Version,
 ) -> Result<()> {
-    let batch = LedgerDbSchemaBatches::new();
+    let mut batch = LedgerDbSchemaBatches::new();
 
     delete_transaction_index_data(
         ledger_db,
         transaction_store,
         start_version,
-        &batch.transaction_db_batches,
+        &mut batch.transaction_db_batches,
     )?;
     delete_per_epoch_data(
         &ledger_db.metadata_db_arc(),
         start_version,
-        &batch.ledger_metadata_db_batches,
+        &mut batch.ledger_metadata_db_batches,
     )?;
-    delete_per_version_data(ledger_db, start_version, &batch)?;
+    delete_per_version_data(ledger_db, start_version, &mut batch)?;
 
-    delete_event_data(ledger_db, start_version, &batch.event_db_batches)?;
+    delete_event_data(ledger_db, start_version, &mut batch.event_db_batches)?;
 
     truncate_transaction_accumulator(
         ledger_db.transaction_accumulator_db_raw(),
         start_version,
-        &batch.transaction_accumulator_db_batches,
+        &mut batch.transaction_accumulator_db_batches,
     )?;
 
-    let progress_batch = SchemaBatch::new();
+    let mut progress_batch = SchemaBatch::new();
     progress_batch.put::<DbMetadataSchema>(
         &DbMetadataKey::LedgerCommitProgress,
         &DbMetadataValue::Version(start_version - 1),
@@ -277,7 +359,7 @@ fn delete_transaction_index_data(
     ledger_db: &LedgerDb,
     transaction_store: &TransactionStore,
     start_version: Version,
-    batch: &SchemaBatch,
+    batch: &mut SchemaBatch,
 ) -> Result<()> {
     let transactions = ledger_db
         .transaction_db()
@@ -302,9 +384,9 @@ fn delete_transaction_index_data(
 fn delete_per_epoch_data(
     ledger_db: &DB,
     start_version: Version,
-    batch: &SchemaBatch,
+    batch: &mut SchemaBatch,
 ) -> Result<()> {
-    let mut iter = ledger_db.iter::<LedgerInfoSchema>(ReadOptions::default())?;
+    let mut iter = ledger_db.iter::<LedgerInfoSchema>()?;
     iter.seek_to_last();
     if let Some((epoch, ledger_info)) = iter.next().transpose()? {
         let version = ledger_info.commit_info().version();
@@ -318,7 +400,7 @@ fn delete_per_epoch_data(
         }
     }
 
-    let mut iter = ledger_db.iter::<EpochByVersionSchema>(ReadOptions::default())?;
+    let mut iter = ledger_db.iter::<EpochByVersionSchema>()?;
     iter.seek(&start_version)?;
 
     for item in iter {
@@ -338,27 +420,32 @@ fn delete_per_epoch_data(
 fn delete_per_version_data(
     ledger_db: &LedgerDb,
     start_version: Version,
-    batch: &LedgerDbSchemaBatches,
+    batch: &mut LedgerDbSchemaBatches,
 ) -> Result<()> {
+    delete_per_version_data_impl::<TransactionAccumulatorRootHashSchema>(
+        ledger_db.transaction_accumulator_db_raw(),
+        start_version,
+        &mut batch.transaction_accumulator_db_batches,
+    )?;
     delete_per_version_data_impl::<TransactionInfoSchema>(
         ledger_db.transaction_info_db_raw(),
         start_version,
-        &batch.transaction_info_db_batches,
+        &mut batch.transaction_info_db_batches,
     )?;
     delete_per_version_data_impl::<TransactionSchema>(
         ledger_db.transaction_db_raw(),
         start_version,
-        &batch.transaction_db_batches,
+        &mut batch.transaction_db_batches,
     )?;
     delete_per_version_data_impl::<VersionDataSchema>(
         &ledger_db.metadata_db_arc(),
         start_version,
-        &batch.ledger_metadata_db_batches,
+        &mut batch.ledger_metadata_db_batches,
     )?;
     delete_per_version_data_impl::<WriteSetSchema>(
         ledger_db.write_set_db_raw(),
         start_version,
-        &batch.write_set_db_batches,
+        &mut batch.write_set_db_batches,
     )?;
 
     Ok(())
@@ -367,22 +454,22 @@ fn delete_per_version_data(
 fn delete_per_version_data_impl<S>(
     ledger_db: &DB,
     start_version: Version,
-    batch: &SchemaBatch,
+    batch: &mut SchemaBatch,
 ) -> Result<()>
 where
     S: Schema<Key = Version>,
 {
-    let mut iter = ledger_db.iter::<S>(ReadOptions::default())?;
+    let mut iter = ledger_db.iter::<S>()?;
     iter.seek_to_last();
-    if let Some((lastest_version, _)) = iter.next().transpose()? {
-        if lastest_version >= start_version {
+    if let Some((latest_version, _)) = iter.next().transpose()? {
+        if latest_version >= start_version {
             info!(
                 start_version = start_version,
-                latest_version = lastest_version,
+                latest_version = latest_version,
                 cf_name = S::COLUMN_FAMILY_NAME,
                 "Truncate per version data."
             );
-            for version in start_version..=lastest_version {
+            for version in start_version..=latest_version {
                 batch.delete::<S>(&version)?;
             }
         }
@@ -393,7 +480,7 @@ where
 fn delete_event_data(
     ledger_db: &LedgerDb,
     start_version: Version,
-    batch: &SchemaBatch,
+    batch: &mut SchemaBatch,
 ) -> Result<()> {
     if let Some(latest_version) = ledger_db.event_db().latest_version()? {
         if latest_version >= start_version {
@@ -402,9 +489,20 @@ fn delete_event_data(
                 latest_version = latest_version,
                 "Truncate event data."
             );
-            ledger_db
-                .event_db()
-                .prune_events(start_version, latest_version + 1, batch)?;
+            let num_events_per_version = ledger_db.event_db().prune_event_indices(
+                start_version,
+                latest_version + 1,
+                // Assuming same data will be overwritten into indices, we don't bother to deal
+                // with the existence or placement of indices
+                // TODO: prune data from internal indices
+                None,
+            )?;
+            ledger_db.event_db().prune_events(
+                num_events_per_version,
+                start_version,
+                latest_version + 1,
+                batch,
+            )?;
         }
     }
     Ok(())
@@ -413,19 +511,30 @@ fn delete_event_data(
 fn delete_state_value_and_index(
     state_kv_db_shard: &DB,
     start_version: Version,
-    expected_current_version: Option<Version>,
-    batch: &SchemaBatch,
+    batch: &mut SchemaBatch,
+    enable_sharding: bool,
 ) -> Result<()> {
-    let mut iter = state_kv_db_shard.iter::<StaleStateValueIndexSchema>(ReadOptions::default())?;
-    iter.seek(&start_version)?;
+    if enable_sharding {
+        let mut iter = state_kv_db_shard.iter::<StaleStateValueIndexByKeyHashSchema>()?;
+        iter.seek(&start_version)?;
 
-    for item in iter {
-        let (index, _) = item?;
-        if let Some(expected_current_version) = expected_current_version {
-            assert_lt!(index.stale_since_version, expected_current_version);
+        for item in iter {
+            let (index, _) = item?;
+            batch.delete::<StaleStateValueIndexByKeyHashSchema>(&index)?;
+            batch.delete::<StateValueByKeyHashSchema>(&(
+                index.state_key_hash,
+                index.stale_since_version,
+            ))?;
         }
-        batch.delete::<StaleStateValueIndexSchema>(&index)?;
-        batch.delete::<StateValueSchema>(&(index.state_key, index.stale_since_version))?;
+    } else {
+        let mut iter = state_kv_db_shard.iter::<StaleStateValueIndexSchema>()?;
+        iter.seek(&start_version)?;
+
+        for item in iter {
+            let (index, _) = item?;
+            batch.delete::<StaleStateValueIndexSchema>(&index)?;
+            batch.delete::<StateValueSchema>(&(index.state_key, index.stale_since_version))?;
+        }
     }
 
     Ok(())
@@ -434,13 +543,13 @@ fn delete_state_value_and_index(
 fn delete_stale_node_index_at_or_after_version<S>(
     db: &DB,
     version: Version,
-    batch: &SchemaBatch,
+    batch: &mut SchemaBatch,
 ) -> Result<()>
 where
     S: Schema<Key = StaleNodeIndex>,
     Version: SeekKeyCodec<S>,
 {
-    let mut iter = db.iter::<S>(ReadOptions::default())?;
+    let mut iter = db.iter::<S>()?;
     iter.seek(&version)?;
     for item in iter {
         let (index, _) = item?;
@@ -454,31 +563,34 @@ where
 fn delete_nodes_and_stale_indices_at_or_after_version(
     db: &DB,
     version: Version,
-    batch: &SchemaBatch,
+    shard_id: Option<u8>,
+    batch: &mut SchemaBatch,
 ) -> Result<()> {
     delete_stale_node_index_at_or_after_version::<StaleNodeIndexSchema>(db, version, batch)?;
     delete_stale_node_index_at_or_after_version::<StaleNodeIndexCrossEpochSchema>(
         db, version, batch,
     )?;
 
-    let mut iter = db.iter::<JellyfishMerkleNodeSchema>(ReadOptions::default())?;
+    let mut iter = db.iter::<JellyfishMerkleNodeSchema>()?;
     iter.seek(&NodeKey::new_empty_path(version))?;
     for item in iter {
         let (key, _) = item?;
         batch.delete::<JellyfishMerkleNodeSchema>(&key)?;
     }
 
-    Ok(())
+    StateMerkleDb::put_progress(version.checked_sub(1), shard_id, batch)
 }
 
 struct Progress {
+    message: &'static str,
     current_version: AtomicU64,
     target_version: Version,
 }
 
 impl Progress {
-    pub fn new(target_version: Version) -> Self {
+    pub fn new(message: &'static str, target_version: Version) -> Self {
         Self {
+            message,
             current_version: 0.into(),
             target_version,
         }
@@ -494,7 +606,8 @@ impl Display for Progress {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "current: {}, target: {}",
+            "{}: current: {}, target: {}",
+            self.message,
             self.current_version.load(Ordering::Relaxed),
             self.target_version
         )

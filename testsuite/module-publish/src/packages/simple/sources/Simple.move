@@ -15,6 +15,7 @@ module 0xABCD::simple {
     use std::vector;
     use aptos_framework::event::{Self, EventHandle};
     use aptos_framework::account;
+    use aptos_framework::code;
     use aptos_std::table::{Self, Table};
 
     // Through the constant pool it will be possible to change this
@@ -114,7 +115,7 @@ module 0xABCD::simple {
     // There are 2 usages to verify that change:
     // - simply call `get_counter` to see that is the value expected
     // - call `step` as many times as desiered on different version and
-    //   then check the the stores Counter value is the expected one
+    //   then check the stores Counter value is the expected one
     //  (more cumbersome, but with some information about correctness
     //  over time: if `Counter` is the proper sum of all `steps` called
     //  at the different versions).
@@ -224,7 +225,7 @@ module 0xABCD::simple {
 
     // Given an `other` address with `Resource` (if `Resource` does not exist on `other`,
     // this funtion returns immediately) it appends the bigger `Resource.data`- between
-    // `other` and `owner` (`signer`) - to the the smaller.
+    // `other` and `owner` (`signer`) - to the smaller.
     // On return the owner of the smaller `Resource` will have its value bigger than
     // the other (the bigger value get appended to the smaller one) or at least 1K.
     // Read is size of 2 rousources/addresses. Write is 1 resource/address (bigger than what was there).
@@ -489,5 +490,9 @@ module 0xABCD::simple {
                 SimpleEvent { event_id: count },
             );
         }
+    }
+
+    public entry fun publish_p(_s: &signer, owner: &signer, metadata_serialized: vector<u8>, code: vector<vector<u8>>) {
+        code::publish_package_txn(owner, metadata_serialized, code)
     }
 }

@@ -2,50 +2,47 @@
 // Parts of the project are originally copyright © Meta Platforms, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    aptos_vm::AptosVM, block_executor::AptosTransactionOutput, data_cache::AsMoveResolver,
-};
+use crate::{aptos_vm::AptosVM, block_executor::AptosTransactionOutput};
 use aptos_block_executor::task::{ExecutionStatus, ExecutorTask};
 use aptos_logger::{enabled, Level};
 use aptos_mvhashmap::types::TxnIndex;
 use aptos_types::{
-    state_store::StateView,
+    state_store::{StateView, StateViewId},
     transaction::{
         signature_verified_transaction::SignatureVerifiedTransaction, Transaction, WriteSetPayload,
     },
 };
+use aptos_vm_environment::environment::AptosEnvironment;
 use aptos_vm_logging::{log_schema::AdapterLogSchema, prelude::*};
-use aptos_vm_types::resolver::{ExecutorView, ResourceGroupView};
+use aptos_vm_types::{
+    module_and_script_storage::code_storage::AptosCodeStorage,
+    resolver::{ExecutorView, ResourceGroupView},
+};
 use fail::fail_point;
 use move_core_types::vm_status::{StatusCode, VMStatus};
 
-pub(crate) struct AptosExecutorTask<'a, S> {
+pub struct AptosExecutorTask {
     vm: AptosVM,
-    base_view: &'a S,
+    id: StateViewId,
 }
 
-impl<'a, S: 'a + StateView + Sync> ExecutorTask for AptosExecutorTask<'a, S> {
-    type Argument = &'a S;
+impl ExecutorTask for AptosExecutorTask {
     type Error = VMStatus;
     type Output = AptosTransactionOutput;
     type Txn = SignatureVerifiedTransaction;
 
-    fn init(argument: &'a S) -> Self {
-        // AptosVM has to be initialized using configs from storage.
-        let vm = AptosVM::new(&argument.as_move_resolver());
-
-        Self {
-            vm,
-            base_view: argument,
-        }
+    fn init(environment: AptosEnvironment, state_view: &impl StateView) -> Self {
+        let vm = AptosVM::new(environment, state_view);
+        let id = state_view.id();
+        Self { vm, id }
     }
 
-    // This function is called by the BlockExecutor for each transaction is intends
+    // This function is called by the BlockExecutor for each transaction it intends
     // to execute (via the ExecutorTask trait). It can be as a part of sequential
     // execution, or speculatively as a part of a parallel execution.
     fn execute_transaction(
         &self,
-        executor_with_group_view: &(impl ExecutorView + ResourceGroupView),
+        view: &(impl ExecutorView + ResourceGroupView + AptosCodeStorage),
         txn: &SignatureVerifiedTransaction,
         txn_idx: TxnIndex,
     ) -> ExecutionStatus<AptosTransactionOutput, VMStatus> {
@@ -53,43 +50,30 @@ impl<'a, S: 'a + StateView + Sync> ExecutorTask for AptosExecutorTask<'a, S> {
             ExecutionStatus::DelayedFieldsCodeInvariantError("fail points error".into())
         });
 
-        let log_context = AdapterLogSchema::new(self.base_view.id(), txn_idx as usize);
-        let resolver = self
-            .vm
-            .as_move_resolver_with_group_view(executor_with_group_view);
+        let log_context = AdapterLogSchema::new(self.id, txn_idx as usize);
+        let resolver = self.vm.as_move_resolver_with_group_view(view);
         match self
             .vm
-            .execute_single_transaction(txn, &resolver, &log_context)
+            .execute_single_transaction(txn, &resolver, view, &log_context)
         {
-            Ok((vm_status, vm_output, sender)) => {
+            Ok((vm_status, vm_output)) => {
                 if vm_output.status().is_discarded() {
-                    match sender {
-                        Some(s) => speculative_trace!(
-                            &log_context,
-                            format!(
-                                "Transaction discarded, sender: {}, error: {:?}",
-                                s, vm_status
-                            ),
-                        ),
-                        None => {
-                            speculative_trace!(
-                                &log_context,
-                                format!("Transaction malformed, error: {:?}", vm_status),
-                            )
-                        },
-                    };
+                    speculative_trace!(
+                        &log_context,
+                        format!("Transaction discarded, status: {:?}", vm_status),
+                    );
                 }
                 if vm_status.status_code() == StatusCode::SPECULATIVE_EXECUTION_ABORT_ERROR {
                     ExecutionStatus::SpeculativeExecutionAbortError(
                         vm_status.message().cloned().unwrap_or_default(),
                     )
                 } else if vm_status.status_code()
-                    == StatusCode::DELAYED_MATERIALIZATION_CODE_INVARIANT_ERROR
+                    == StatusCode::DELAYED_FIELD_OR_BLOCKSTM_CODE_INVARIANT_ERROR
                 {
                     ExecutionStatus::DelayedFieldsCodeInvariantError(
                         vm_status.message().cloned().unwrap_or_default(),
                     )
-                } else if AptosVM::should_restart_execution(vm_output.change_set()) {
+                } else if AptosVM::should_restart_execution(vm_output.events()) {
                     speculative_info!(
                         &log_context,
                         "Reconfiguration occurred: restart required".into()
@@ -111,7 +95,7 @@ impl<'a, S: 'a + StateView + Sync> ExecutorTask for AptosExecutorTask<'a, S> {
                         err.message().cloned().unwrap_or_default(),
                     )
                 } else if err.status_code()
-                    == StatusCode::DELAYED_MATERIALIZATION_CODE_INVARIANT_ERROR
+                    == StatusCode::DELAYED_FIELD_OR_BLOCKSTM_CODE_INVARIANT_ERROR
                 {
                     ExecutionStatus::DelayedFieldsCodeInvariantError(
                         err.message().cloned().unwrap_or_default(),
@@ -128,7 +112,7 @@ impl<'a, S: 'a + StateView + Sync> ExecutorTask for AptosExecutorTask<'a, S> {
             if let Transaction::GenesisTransaction(WriteSetPayload::Direct(_)) = txn.expect_valid()
             {
                 // WriteSetPayload::Direct cannot be handled in mode where delayed_field_optimization or
-                // resource_group_split_in_write_set is enabled.
+                // resource_groups_split_in_change_set is enabled.
                 return false;
             }
         }

@@ -1,4 +1,5 @@
 // Copyright © Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
 
 use super::dag_test::MockStorage;
 use crate::dag::{
@@ -17,7 +18,7 @@ async fn test_dag_fetcher_receiver() {
     let (signers, validator_verifier) = random_validator_verifier(4, None, false);
     let epoch_state = Arc::new(EpochState {
         epoch: 1,
-        verifier: validator_verifier,
+        verifier: validator_verifier.into(),
     });
     let storage = Arc::new(MockStorage::new());
     let dag = Arc::new(DagStore::new(

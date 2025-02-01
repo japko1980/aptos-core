@@ -23,7 +23,6 @@ use std::sync::Arc;
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))]
-
     #[test]
     fn test_txn_store_pruner(txns in vec(
         prop_oneof![
@@ -58,10 +57,10 @@ fn verify_write_set_pruner(write_sets: Vec<WriteSet>) {
     });
 
     // write sets
-    let batch = SchemaBatch::new();
+    let mut batch = SchemaBatch::new();
     for (ver, ws) in write_sets.iter().enumerate() {
         transaction_store
-            .put_write_set(ver as Version, ws, &batch)
+            .put_write_set(ver as Version, ws, &mut batch)
             .unwrap();
     }
     aptos_db
@@ -106,7 +105,7 @@ fn verify_txn_store_pruner(
         &txns,
     );
 
-    let batch = SchemaBatch::new();
+    let mut batch = SchemaBatch::new();
     for i in 0..=num_transaction as u64 {
         let usage = StateStorageUsage::zero();
         batch.put::<VersionDataSchema>(&i, &usage.into()).unwrap();
@@ -234,7 +233,7 @@ fn put_txn_in_store(
     txn_infos: &[TransactionInfo],
     txns: &[Transaction],
 ) {
-    let transaction_batch = SchemaBatch::new();
+    let mut transaction_batch = SchemaBatch::new();
     for i in 0..txns.len() {
         transaction_store
             .put_transaction(
@@ -250,8 +249,8 @@ fn put_txn_in_store(
         .transaction_db()
         .write_schemas(transaction_batch)
         .unwrap();
-    let transaction_info_batch = SchemaBatch::new();
-    let transaction_accumulator_batch = SchemaBatch::new();
+    let mut transaction_info_batch = SchemaBatch::new();
+    let mut transaction_accumulator_batch = SchemaBatch::new();
     ledger_store
         .put_transaction_infos(
             0,

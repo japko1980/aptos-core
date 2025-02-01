@@ -4,7 +4,7 @@
 use crate::VerifierConfig;
 use move_binary_format::{
     file_format::{
-        empty_module, AbilitySet, AddressIdentifierIndex,
+        empty_module, AddressIdentifierIndex,
         Bytecode::{self, *},
         CodeUnit, Constant, FieldDefinition, FunctionDefinition, FunctionHandle,
         FunctionHandleIndex, IdentifierIndex, ModuleHandle, ModuleHandleIndex, Signature,
@@ -17,7 +17,8 @@ use move_binary_format::{
     CompiledModule,
 };
 use move_core_types::{
-    account_address::AccountAddress, ident_str, identifier::Identifier, vm_status::StatusCode,
+    ability::AbilitySet, account_address::AccountAddress, ident_str, identifier::Identifier,
+    vm_status::StatusCode,
 };
 
 #[test]
@@ -155,6 +156,10 @@ fn too_many_locals() {
                 code: vec![CopyLoc(2), StLoc(33), Branch(0)],
             }),
         }],
+        struct_variant_handles: vec![],
+        struct_variant_instantiations: vec![],
+        variant_field_handles: vec![],
+        variant_field_instantiations: vec![],
     };
 
     let res = crate::verify_module(&module);
@@ -207,6 +212,10 @@ fn borrow_graph() {
                 code: vec![MoveLoc(0), MoveLoc(1), StLoc(0), StLoc(1), Branch(0)],
             }),
         }],
+        struct_variant_handles: vec![],
+        struct_variant_instantiations: vec![],
+        variant_field_handles: vec![],
+        variant_field_instantiations: vec![],
     };
 
     let res = crate::verify_module(&module);
@@ -312,6 +321,10 @@ fn indirect_code() {
                 code,
             }),
         }],
+        struct_variant_handles: vec![],
+        struct_variant_instantiations: vec![],
+        variant_field_handles: vec![],
+        variant_field_instantiations: vec![],
     };
 
     let res = crate::verify_module_with_config(&VerifierConfig::unbounded(), &module).unwrap_err();

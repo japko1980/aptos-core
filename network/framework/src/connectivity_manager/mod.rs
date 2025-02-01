@@ -31,6 +31,7 @@ use crate::{
     application::storage::PeersAndMetadata,
     counters,
     logging::NetworkSchema,
+    peer::DisconnectReason,
     peer_manager::{self, conn_notifs_channel, ConnectionRequestSender, PeerManagerError},
     transport::ConnectionMetadata,
 };
@@ -511,8 +512,10 @@ where
                     stale_peer.short_str()
                 );
 
-                if let Err(disconnect_error) =
-                    self.connection_reqs_tx.disconnect_peer(stale_peer).await
+                if let Err(disconnect_error) = self
+                    .connection_reqs_tx
+                    .disconnect_peer(stale_peer, DisconnectReason::StaleConnection)
+                    .await
                 {
                     info!(
                         NetworkSchema::new(&self.network_context)
@@ -1006,7 +1009,7 @@ where
             "Connection notification"
         );
         match notif {
-            peer_manager::ConnectionNotification::NewPeer(metadata, _context) => {
+            peer_manager::ConnectionNotification::NewPeer(metadata, _network_id) => {
                 let peer_id = metadata.remote_peer_id;
                 counters::peer_connected(&self.network_context, &peer_id, 1);
                 self.connected.insert(peer_id, metadata);
@@ -1015,7 +1018,7 @@ where
                 self.dial_states.remove(&peer_id);
                 self.dial_queue.remove(&peer_id);
             },
-            peer_manager::ConnectionNotification::LostPeer(metadata, _context, _reason) => {
+            peer_manager::ConnectionNotification::LostPeer(metadata, _network_id) => {
                 let peer_id = metadata.remote_peer_id;
                 if let Some(stored_metadata) = self.connected.get(&peer_id) {
                     // Remove node from connected peers list.

@@ -23,11 +23,16 @@ use aptos_storage_interface::DbReaderWriter;
 use aptos_temppath::TempPath;
 use aptos_types::{
     chain_id::ChainId,
-    on_chain_config::{GasScheduleV2, OnChainConsensusConfig, OnChainExecutionConfig},
+    jwks::patch::IssuerJWK,
+    keyless::Groth16VerificationKey,
+    on_chain_config::{
+        Features, GasScheduleV2, OnChainConsensusConfig, OnChainExecutionConfig,
+        OnChainJWKConsensusConfig, OnChainRandomnessConfig,
+    },
     transaction::Transaction,
     waypoint::Waypoint,
 };
-use aptos_vm::AptosVM;
+use aptos_vm::aptos_vm::AptosVMBlockExecutor;
 use aptos_vm_genesis::Validator;
 use std::convert::TryInto;
 
@@ -70,6 +75,11 @@ pub struct GenesisInfo {
     pub consensus_config: OnChainConsensusConfig,
     pub execution_config: OnChainExecutionConfig,
     pub gas_schedule: GasScheduleV2,
+    pub initial_features_override: Option<Features>,
+    pub randomness_config_override: Option<OnChainRandomnessConfig>,
+    pub jwk_consensus_config_override: Option<OnChainJWKConsensusConfig>,
+    pub initial_jwks: Vec<IssuerJWK>,
+    pub keyless_groth16_vk: Option<Groth16VerificationKey>,
 }
 
 impl GenesisInfo {
@@ -106,6 +116,11 @@ impl GenesisInfo {
             consensus_config: genesis_config.consensus_config.clone(),
             execution_config: genesis_config.execution_config.clone(),
             gas_schedule: genesis_config.gas_schedule.clone(),
+            initial_features_override: genesis_config.initial_features_override.clone(),
+            randomness_config_override: genesis_config.randomness_config_override.clone(),
+            jwk_consensus_config_override: genesis_config.jwk_consensus_config_override.clone(),
+            initial_jwks: genesis_config.initial_jwks.clone(),
+            keyless_groth16_vk: genesis_config.keyless_groth16_vk.clone(),
         })
     }
 
@@ -138,6 +153,11 @@ impl GenesisInfo {
                 voting_power_increase_limit: self.voting_power_increase_limit,
                 employee_vesting_start: 1663456089,
                 employee_vesting_period_duration: 5 * 60, // 5 minutes
+                initial_features_override: self.initial_features_override.clone(),
+                randomness_config_override: self.randomness_config_override.clone(),
+                jwk_consensus_config_override: self.jwk_consensus_config_override.clone(),
+                initial_jwks: self.initial_jwks.clone(),
+                keyless_groth16_vk: self.keyless_groth16_vk.clone(),
             },
             &self.consensus_config,
             &self.execution_config,
@@ -156,8 +176,9 @@ impl GenesisInfo {
             false, /* indexer */
             BUFFERED_STATE_TARGET_ITEMS,
             DEFAULT_MAX_NUM_NODES_PER_LRU_CACHE_SHARD,
+            None,
         )?;
         let db_rw = DbReaderWriter::new(aptosdb);
-        aptos_executor::db_bootstrapper::generate_waypoint::<AptosVM>(&db_rw, genesis)
+        aptos_executor::db_bootstrapper::generate_waypoint::<AptosVMBlockExecutor>(&db_rw, genesis)
     }
 }

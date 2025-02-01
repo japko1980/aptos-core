@@ -8,12 +8,19 @@ use crate::{
 };
 use aptos_crypto::ed25519::Ed25519PrivateKey;
 use aptos_logger::info;
-use aptos_sdk::{transaction_builder::TransactionFactory, types::LocalAccount};
-use aptos_storage_interface::{state_view::LatestDbStateCheckpointView, DbReader, DbReaderWriter};
+use aptos_sdk::{
+    transaction_builder::{aptos_stdlib, TransactionFactory},
+    types::LocalAccount,
+};
+use aptos_storage_interface::{
+    state_store::state_view::db_state_view::LatestDbStateCheckpointView, DbReader, DbReaderWriter,
+};
 use aptos_types::{
-    account_address::AccountAddress, account_config::aptos_test_root_address,
-    account_view::AccountView, chain_id::ChainId,
-    state_store::account_with_state_view::AsAccountWithStateView, transaction::Transaction,
+    account_address::AccountAddress,
+    account_config::{aptos_test_root_address, AccountResource},
+    chain_id::ChainId,
+    state_store::MoveResourceExt,
+    transaction::Transaction,
 };
 use chrono::Local;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -55,9 +62,7 @@ pub(crate) fn get_progress_bar(num_accounts: usize) -> ProgressBar {
 fn get_sequence_number(address: AccountAddress, reader: Arc<dyn DbReader>) -> u64 {
     let db_state_view = reader.latest_state_checkpoint_view().unwrap();
 
-    let account_state_view = db_state_view.as_account_with_state_view(&address);
-
-    match account_state_view.get_account_resource().unwrap() {
+    match AccountResource::fetch_move_resource(&db_state_view, &address).unwrap() {
         Some(account_resource) => account_resource.sequence_number(),
         None => 0,
     }
@@ -154,11 +159,12 @@ impl TransactionGenerator {
         reader: Arc<dyn DbReader>,
         num_accounts: usize,
         num_to_skip: usize,
+        is_keyless: bool,
     ) -> AccountCache {
         Self::resync_sequence_numbers(
             reader,
             Self::gen_account_cache(
-                AccountGenerator::new_for_user_accounts(num_to_skip as u64),
+                AccountGenerator::new_for_user_accounts(num_to_skip as u64, is_keyless),
                 num_accounts,
                 "user",
             ),
@@ -166,11 +172,15 @@ impl TransactionGenerator {
         )
     }
 
-    fn gen_seed_account_cache(reader: Arc<dyn DbReader>, num_accounts: usize) -> AccountCache {
+    fn gen_seed_account_cache(
+        reader: Arc<dyn DbReader>,
+        num_accounts: usize,
+        is_keyless: bool,
+    ) -> AccountCache {
         Self::resync_sequence_numbers(
             reader,
             Self::gen_account_cache(
-                AccountGenerator::new_for_seed_accounts(),
+                AccountGenerator::new_for_seed_accounts(is_keyless),
                 num_accounts,
                 "seed",
             ),
@@ -185,6 +195,7 @@ impl TransactionGenerator {
         db_dir: P,
         num_main_signer_accounts: Option<usize>,
         num_workers: usize,
+        is_keyless: bool,
     ) -> Self {
         let num_existing_accounts = TransactionGenerator::read_meta(&db_dir);
 
@@ -194,7 +205,7 @@ impl TransactionGenerator {
             main_signer_accounts: num_main_signer_accounts.map(|num_main_signer_accounts| {
                 let num_cached_accounts =
                     std::cmp::min(num_existing_accounts, num_main_signer_accounts);
-                Self::gen_user_account_cache(db.reader.clone(), num_cached_accounts, 0)
+                Self::gen_user_account_cache(db.reader.clone(), num_cached_accounts, 0, is_keyless)
             }),
             num_existing_accounts,
             block_sender: Some(block_sender),
@@ -256,6 +267,7 @@ impl TransactionGenerator {
         num_new_accounts: usize,
         init_account_balance: u64,
         block_size: usize,
+        is_keyless: bool,
     ) {
         assert!(self.block_sender.is_some());
         // Ensure that seed accounts have enough balance to transfer money to at least 10000 account with
@@ -265,12 +277,14 @@ impl TransactionGenerator {
             num_new_accounts,
             block_size,
             init_account_balance * 10_000,
+            is_keyless,
         );
         self.create_and_fund_accounts(
             num_existing_accounts,
             num_new_accounts,
             init_account_balance,
             block_size,
+            is_keyless,
         );
     }
 
@@ -282,7 +296,7 @@ impl TransactionGenerator {
         connected_tx_grps: usize,
         shuffle_connected_txns: bool,
         hotspot_probability: Option<f32>,
-    ) {
+    ) -> usize {
         assert!(self.block_sender.is_some());
         self.gen_transfer_transactions(
             block_size,
@@ -292,6 +306,7 @@ impl TransactionGenerator {
             shuffle_connected_txns,
             hotspot_probability,
         );
+        num_transfer_blocks
     }
 
     pub fn run_workload(
@@ -301,14 +316,15 @@ impl TransactionGenerator {
         transaction_generators: Vec<Box<dyn aptos_transaction_generator_lib::TransactionGenerator>>,
         phase: Arc<AtomicUsize>,
         transactions_per_sender: usize,
-    ) {
+    ) -> usize {
+        let last_non_empty_phase = Arc::new(AtomicUsize::new(0));
         let transaction_generators = Mutex::new(transaction_generators);
         assert!(self.block_sender.is_some());
         let num_senders_per_block =
             (block_size + transactions_per_sender - 1) / transactions_per_sender;
         let account_pool_size = self.main_signer_accounts.as_ref().unwrap().accounts.len();
         let transaction_generator = ThreadLocal::with_capacity(self.num_workers);
-        for _ in 0..num_blocks {
+        for i in 0..num_blocks {
             let sender_indices = rand::seq::index::sample(
                 &mut thread_rng(),
                 account_pool_size,
@@ -317,10 +333,11 @@ impl TransactionGenerator {
             .into_iter()
             .flat_map(|sender_idx| vec![sender_idx; transactions_per_sender])
             .collect();
-            self.generate_and_send_block(
+            let terminate = self.generate_and_send_block(
                 self.main_signer_accounts.as_ref().unwrap(),
                 sender_indices,
                 phase.clone(),
+                last_non_empty_phase.clone(),
                 |sender_idx, _| {
                     let sender = &self.main_signer_accounts.as_ref().unwrap().accounts[sender_idx];
                     let mut transaction_generator = transaction_generator
@@ -335,7 +352,11 @@ impl TransactionGenerator {
                 },
                 |sender_idx| *sender_idx,
             );
+            if terminate {
+                return i + 1;
+            }
         }
+        num_blocks
     }
 
     pub fn create_seed_accounts(
@@ -344,11 +365,13 @@ impl TransactionGenerator {
         num_new_accounts: usize,
         block_size: usize,
         seed_account_balance: u64,
+        is_keyless: bool,
     ) {
         // We don't store the # of existing seed accounts now. Thus here we just blindly re-create
         // and re-mint seed accounts here.
         let num_seed_accounts = (num_new_accounts / 1000).clamp(1, 100000);
-        let seed_accounts_cache = Self::gen_seed_account_cache(reader, num_seed_accounts);
+        let seed_accounts_cache =
+            Self::gen_seed_account_cache(reader, num_seed_accounts, is_keyless);
 
         println!(
             "[{}] Generating {} seed account creation txns, with {} coins.",
@@ -367,13 +390,12 @@ impl TransactionGenerator {
             let transactions: Vec<_> = chunk
                 .iter()
                 .map(|new_account| {
-                    let txn = self.root_account.sign_with_transaction_builder(
-                        self.transaction_factory
-                            .implicitly_create_user_account_and_transfer(
-                                new_account.public_key(),
-                                seed_account_balance,
-                            ),
+                    let payload = aptos_stdlib::aptos_account_transfer(
+                        new_account.authentication_key().account_address(),
+                        seed_account_balance,
                     );
+                    let builder = self.transaction_factory.payload(payload);
+                    let txn = self.root_account.sign_with_transaction_builder(builder);
                     Transaction::UserTransaction(txn)
                 })
                 .collect();
@@ -394,13 +416,15 @@ impl TransactionGenerator {
         num_new_accounts: usize,
         init_account_balance: u64,
         block_size: usize,
+        is_keyless: bool,
     ) {
         println!(
             "[{}] Generating {} account creation txns.",
             now_fmt!(),
             num_new_accounts
         );
-        let mut generator = AccountGenerator::new_for_user_accounts(num_existing_accounts as u64);
+        let mut generator =
+            AccountGenerator::new_for_user_accounts(num_existing_accounts as u64, is_keyless);
         println!("Skipped first {} existing accounts.", num_existing_accounts);
 
         let bar = get_progress_bar(num_new_accounts);
@@ -421,15 +445,15 @@ impl TransactionGenerator {
                 self.seed_accounts_cache.as_ref().unwrap(),
                 input,
                 Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
                 |(sender_idx, new_account), account_cache| {
                     let sender = &account_cache.accounts[sender_idx];
-                    let txn = sender.sign_with_transaction_builder(
-                        self.transaction_factory
-                            .implicitly_create_user_account_and_transfer(
-                                new_account.public_key(),
-                                init_account_balance,
-                            ),
+                    let payload = aptos_stdlib::aptos_account_transfer(
+                        new_account.authentication_key().account_address(),
+                        init_account_balance,
                     );
+                    let txn = sender
+                        .sign_with_transaction_builder(self.transaction_factory.payload(payload));
                     Some(Transaction::UserTransaction(txn))
                 },
                 |(sender_idx, _)| *sender_idx,
@@ -621,6 +645,7 @@ impl TransactionGenerator {
             account_cache,
             transfer_indices,
             Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
             |(sender_idx, receiver_idx), account_cache| {
                 let txn = account_cache.accounts[sender_idx].sign_with_transaction_builder(
                     self.transaction_factory
@@ -637,9 +662,11 @@ impl TransactionGenerator {
         account_cache: &AccountCache,
         inputs: Vec<T>,
         phase: Arc<AtomicUsize>,
+        last_non_empty_phase: Arc<AtomicUsize>,
         func: F,
         sender_func: S,
-    ) where
+    ) -> bool
+    where
         T: Send,
         F: Fn(T, &AccountCache) -> Option<Transaction> + Send + Sync,
         S: Fn(&T) -> usize,
@@ -680,12 +707,21 @@ impl TransactionGenerator {
 
         if transactions.is_empty() {
             let val = phase.fetch_add(1, Ordering::Relaxed);
+            let last_generated_at = last_non_empty_phase.load(Ordering::Relaxed);
+            if val > last_generated_at + 2 {
+                info!(
+                    "Block generation: no transactions generated in phase {}, and since {}, ending execution",
+                    val, last_generated_at
+                );
+                return true;
+            }
             info!(
                 "Block generation: no transactions generated in phase {}, moving to next phase",
                 val
             );
         } else {
             let val = phase.load(Ordering::Relaxed);
+            last_non_empty_phase.fetch_max(val, Ordering::Relaxed);
             info!(
                 "Block generation: {} transactions generated in phase {}",
                 transactions.len(),
@@ -700,6 +736,7 @@ impl TransactionGenerator {
         if let Some(sender) = &self.block_sender {
             sender.send(transactions).unwrap();
         }
+        false
     }
 
     pub fn gen_transfer_transactions(
@@ -761,10 +798,8 @@ impl TransactionGenerator {
             .for_each(|account| {
                 let address = account.address();
                 let db_state_view = db.latest_state_checkpoint_view().unwrap();
-                let address_account_view = db_state_view.as_account_with_state_view(&address);
                 assert_eq!(
-                    address_account_view
-                        .get_account_resource()
+                    AccountResource::fetch_move_resource(&db_state_view, &address)
                         .unwrap()
                         .unwrap()
                         .sequence_number(),

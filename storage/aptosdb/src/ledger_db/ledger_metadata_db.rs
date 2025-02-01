@@ -13,21 +13,18 @@ use crate::{
     utils::{get_progress, iterators::EpochEndingLedgerInfoIter},
 };
 use anyhow::anyhow;
-use aptos_schemadb::{ReadOptions, SchemaBatch, DB};
-use aptos_storage_interface::{
-    block_info::{BlockInfo, BlockInfoV0},
-    db_ensure as ensure, AptosDbError, Result,
-};
+use aptos_schemadb::{batch::SchemaBatch, DB};
+use aptos_storage_interface::{block_info::BlockInfo, db_ensure as ensure, AptosDbError, Result};
 use aptos_types::{
-    account_config::NewBlockEvent, contract_event::ContractEvent, epoch_state::EpochState,
-    ledger_info::LedgerInfoWithSignatures, state_store::state_storage_usage::StateStorageUsage,
-    transaction::Version,
+    account_config::NewBlockEvent, block_info::BlockHeight, contract_event::ContractEvent,
+    epoch_state::EpochState, ledger_info::LedgerInfoWithSignatures,
+    state_store::state_storage_usage::StateStorageUsage, transaction::Version,
 };
 use arc_swap::ArcSwap;
 use std::{ops::Deref, path::Path, sync::Arc};
 
 fn get_latest_ledger_info_in_db_impl(db: &DB) -> Result<Option<LedgerInfoWithSignatures>> {
-    let mut iter = db.iter::<LedgerInfoSchema>(ReadOptions::default())?;
+    let mut iter = db.iter::<LedgerInfoSchema>()?;
     iter.seek_to_last();
     Ok(iter.next().transpose()?.map(|(_, v)| v))
 }
@@ -44,12 +41,12 @@ pub(crate) struct LedgerMetadataDb {
 
 impl LedgerMetadataDb {
     pub(super) fn new(db: Arc<DB>) -> Self {
-        let ledger_info = get_latest_ledger_info_in_db_impl(&db)
-            .expect("Reading latest ledger info from DB should work.");
+        let latest_ledger_info = get_latest_ledger_info_in_db_impl(&db).expect("DB read failed.");
+        let latest_ledger_info = ArcSwap::from(Arc::new(latest_ledger_info));
 
         Self {
             db,
-            latest_ledger_info: ArcSwap::from(Arc::new(ledger_info)),
+            latest_ledger_info,
         }
     }
 
@@ -64,7 +61,7 @@ impl LedgerMetadataDb {
         )
     }
 
-    pub(super) fn db(&self) -> &DB {
+    pub(crate) fn db(&self) -> &DB {
         &self.db
     }
 
@@ -76,22 +73,18 @@ impl LedgerMetadataDb {
         self.db.write_schemas(batch)
     }
 
-    pub(crate) fn get_latest_version(&self) -> Result<Version> {
-        get_progress(&self.db, &DbMetadataKey::OverallCommitProgress)?.ok_or(
-            AptosDbError::NotFound("No OverallCommitProgress in db.".to_string()),
-        )
+    pub(crate) fn get_synced_version(&self) -> Result<Option<Version>> {
+        get_progress(&self.db, &DbMetadataKey::OverallCommitProgress)
     }
 
     pub(crate) fn get_ledger_commit_progress(&self) -> Result<Version> {
-        get_progress(&self.db, &DbMetadataKey::LedgerCommitProgress)?.ok_or(AptosDbError::NotFound(
-            "No LedgerCommitProgress in db.".to_string(),
-        ))
+        get_progress(&self.db, &DbMetadataKey::LedgerCommitProgress)?
+            .ok_or_else(|| AptosDbError::NotFound("No LedgerCommitProgress in db.".to_string()))
     }
 
     pub(crate) fn get_pruner_progress(&self) -> Result<Version> {
-        get_progress(&self.db, &DbMetadataKey::LedgerPrunerProgress)?.ok_or(AptosDbError::NotFound(
-            "No LedgerPrunerProgress in db.".to_string(),
-        ))
+        get_progress(&self.db, &DbMetadataKey::LedgerPrunerProgress)?
+            .ok_or_else(|| AptosDbError::NotFound("No LedgerPrunerProgress in db.".to_string()))
     }
 }
 
@@ -104,10 +97,16 @@ impl LedgerMetadataDb {
         ledger_info.clone()
     }
 
+    pub(crate) fn get_committed_version(&self) -> Option<Version> {
+        let ledger_info_ptr = self.latest_ledger_info.load();
+        let ledger_info: &Option<_> = ledger_info_ptr.deref();
+        ledger_info.as_ref().map(|li| li.ledger_info().version())
+    }
+
     /// Returns the latest ledger info, or NOT_FOUND if it doesn't exist.
     pub(crate) fn get_latest_ledger_info(&self) -> Result<LedgerInfoWithSignatures> {
         self.get_latest_ledger_info_option()
-            .ok_or(AptosDbError::NotFound(String::from("Genesis LedgerInfo")))
+            .ok_or_else(|| AptosDbError::NotFound(String::from("Genesis LedgerInfo")))
     }
 
     /// Returns the latest ledger info for a given epoch.
@@ -117,9 +116,7 @@ impl LedgerMetadataDb {
     ) -> Result<LedgerInfoWithSignatures> {
         self.db
             .get::<LedgerInfoSchema>(&epoch)?
-            .ok_or(AptosDbError::NotFound(format!(
-                "Last LedgerInfo of epoch {epoch}"
-            )))
+            .ok_or_else(|| AptosDbError::NotFound(format!("Last LedgerInfo of epoch {epoch}")))
     }
 
     /// Returns an iterator that yields epoch ending ledger infos, starting from `start_epoch`, and
@@ -129,7 +126,7 @@ impl LedgerMetadataDb {
         start_epoch: u64,
         end_epoch: u64,
     ) -> Result<EpochEndingLedgerInfoIter> {
-        let mut iter = self.db.iter::<LedgerInfoSchema>(ReadOptions::default())?;
+        let mut iter = self.db.iter::<LedgerInfoSchema>()?;
         iter.seek(&start_epoch)?;
         Ok(EpochEndingLedgerInfoIter::new(iter, start_epoch, end_epoch))
     }
@@ -189,7 +186,7 @@ impl LedgerMetadataDb {
     pub(crate) fn put_ledger_info(
         &self,
         ledger_info_with_sigs: &LedgerInfoWithSignatures,
-        batch: &SchemaBatch,
+        batch: &mut SchemaBatch,
     ) -> Result<()> {
         let ledger_info = ledger_info_with_sigs.ledger_info();
 
@@ -205,9 +202,7 @@ impl LedgerMetadataDb {
 impl LedgerMetadataDb {
     /// Returns the epoch at the given version.
     pub(crate) fn get_epoch(&self, version: Version) -> Result<u64> {
-        let mut iter = self
-            .db
-            .iter::<EpochByVersionSchema>(ReadOptions::default())?;
+        let mut iter = self.db.iter::<EpochByVersionSchema>()?;
         // Search for the end of the previous epoch.
         iter.seek_for_prev(&version)?;
         let (epoch_end_version, epoch) = match iter.next().transpose()? {
@@ -257,9 +252,7 @@ impl LedgerMetadataDb {
         }
         let prev_version = version - 1;
 
-        let mut iter = self
-            .db
-            .iter::<EpochByVersionSchema>(ReadOptions::default())?;
+        let mut iter = self.db.iter::<EpochByVersionSchema>()?;
         // Search for the end of the previous epoch.
         iter.seek_for_prev(&prev_version)?;
         iter.next().transpose()
@@ -275,38 +268,39 @@ impl LedgerMetadataDb {
 
     /// Returns the corresponding block height for a given version.
     pub(crate) fn get_block_height_by_version(&self, version: Version) -> Result<u64> {
-        let mut iter = self
-            .db
-            .iter::<BlockByVersionSchema>(ReadOptions::default())?;
+        let mut iter = self.db.iter::<BlockByVersionSchema>()?;
 
         iter.seek_for_prev(&version)?;
-        let (_, block_height) = iter.next().transpose()?.ok_or(anyhow!(
-            "Block is not found at version {version}, maybe pruned?"
-        ))?;
+        let (_, block_height) = iter
+            .next()
+            .transpose()?
+            .ok_or_else(|| anyhow!("Block is not found at version {version}, maybe pruned?"))?;
 
         Ok(block_height)
+    }
+
+    pub(crate) fn get_block_height_at_or_after_version(
+        &self,
+        version: Version,
+    ) -> Result<(Version, BlockHeight)> {
+        let mut iter = self.db.iter::<BlockByVersionSchema>()?;
+        iter.seek(&version)?;
+        let (block_version, block_height) = iter
+            .next()
+            .transpose()?
+            .ok_or_else(|| anyhow!("Block is not found at or after version {version}"))?;
+
+        Ok((block_version, block_height))
     }
 
     pub(crate) fn put_block_info(
         version: Version,
         event: &ContractEvent,
-        batch: &SchemaBatch,
+        batch: &mut SchemaBatch,
     ) -> Result<()> {
         let new_block_event = NewBlockEvent::try_from_bytes(event.event_data())?;
         let block_height = new_block_event.height();
-        let id = new_block_event.hash()?;
-        let epoch = new_block_event.epoch();
-        let round = new_block_event.round();
-        let proposer = new_block_event.proposer();
-        let block_timestamp_usecs = new_block_event.proposed_time();
-        let block_info = BlockInfo::V0(BlockInfoV0::new(
-            id,
-            epoch,
-            round,
-            proposer,
-            block_timestamp_usecs,
-            version,
-        ));
+        let block_info = BlockInfo::from_new_block_event(version, &new_block_event);
         batch.put::<BlockInfoSchema>(&block_height, &block_info)?;
         batch.put::<BlockByVersionSchema>(&version, &block_height)?;
 
@@ -334,7 +328,7 @@ impl LedgerMetadataDb {
         &self,
         version: Version,
     ) -> Result<(Version, StateStorageUsage)> {
-        let mut iter = self.db.iter::<VersionDataSchema>(ReadOptions::default())?;
+        let mut iter = self.db.iter::<VersionDataSchema>()?;
         iter.seek_for_prev(&version)?;
         match iter.next().transpose()? {
             Some((previous_version, data)) => {

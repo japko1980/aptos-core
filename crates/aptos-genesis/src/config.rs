@@ -6,8 +6,10 @@ use aptos_crypto::{bls12381, ed25519::Ed25519PublicKey, x25519};
 use aptos_types::{
     account_address::{AccountAddress, AccountAddressWithChecks},
     chain_id::ChainId,
+    jwks::patch::IssuerJWK,
+    keyless::Groth16VerificationKey,
     network_address::{DnsName, NetworkAddress, Protocol},
-    on_chain_config::{OnChainConsensusConfig, OnChainExecutionConfig},
+    on_chain_config::{OnChainConsensusConfig, OnChainExecutionConfig, OnChainJWKConsensusConfig},
     transaction::authenticator::AuthenticationKey,
 };
 use aptos_vm_genesis::{AccountBalance, EmployeePool, Validator, ValidatorWithCommissionRate};
@@ -73,6 +75,18 @@ pub struct Layout {
     /// Onchain Execution Config
     #[serde(default = "OnChainExecutionConfig::default_for_genesis")]
     pub on_chain_execution_config: OnChainExecutionConfig,
+
+    /// An optional JWK consensus config to use, instead of `default_for_genesis()`.
+    #[serde(default)]
+    pub jwk_consensus_config_override: Option<OnChainJWKConsensusConfig>,
+
+    /// JWKs to patch in genesis.
+    #[serde(default)]
+    pub initial_jwks: Vec<IssuerJWK>,
+
+    /// Keyless Groth16 verification key to install in genesis.
+    #[serde(default)]
+    pub keyless_groth16_vk_override: Option<Groth16VerificationKey>,
 }
 
 impl Layout {
@@ -112,6 +126,9 @@ impl Default for Layout {
             employee_vesting_period_duration: Some(5 * 60), // 5 minutes
             on_chain_consensus_config: OnChainConsensusConfig::default(),
             on_chain_execution_config: OnChainExecutionConfig::default_for_genesis(),
+            jwk_consensus_config_override: None,
+            initial_jwks: vec![],
+            keyless_groth16_vk_override: None,
         }
     }
 }

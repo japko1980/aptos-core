@@ -1,4 +1,5 @@
 // Copyright © Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
 
 // Copyright (c) The Diem Core Contributors
 // Copyright (c) The Move Contributors
@@ -37,7 +38,7 @@ fn native_create_signers_for_testing(
     let num_signers = safely_pop_arg!(args, u64);
 
     let signers = Value::vector_for_testing_only(
-        (0..num_signers).map(|i| Value::signer(AccountAddress::new(to_le_bytes(i)))),
+        (0..num_signers).map(|i| Value::master_signer(AccountAddress::new(to_le_bytes(i)))),
     );
 
     Ok(smallvec![signers])

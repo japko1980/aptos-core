@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
+#![deny(deprecated)]
 
 use std::fmt;
 
@@ -10,8 +11,11 @@ pub mod access;
 pub mod binary_views;
 pub mod check_bounds;
 pub mod compatibility;
+pub mod compatibility_legacy;
 #[macro_use]
 pub mod errors;
+pub mod builders;
+pub mod check_complexity;
 pub mod constant;
 pub mod control_flow_graph;
 pub mod deserializer;
@@ -51,6 +55,12 @@ pub enum IndexKind {
     CodeDefinition,
     TypeParameter,
     MemberCount,
+    // Since bytecode version 7
+    VariantDefinition,
+    VariantFieldHandle,
+    VariantFieldInstantiation,
+    StructVariantHandle,
+    StructVariantInstantiation,
 }
 
 impl IndexKind {
@@ -77,6 +87,12 @@ impl IndexKind {
             CodeDefinition,
             TypeParameter,
             MemberCount,
+            // Since bytecode version 7
+            VariantDefinition,
+            VariantFieldHandle,
+            VariantFieldInstantiation,
+            StructVariantHandle,
+            StructVariantInstantiation,
         ]
     }
 }
@@ -97,6 +113,7 @@ impl fmt::Display for IndexKind {
             StructDefinition => "struct definition",
             FunctionDefinition => "function definition",
             FieldDefinition => "field definition",
+            VariantDefinition => "variant definition",
             Signature => "signature",
             Identifier => "identifier",
             AddressIdentifier => "address identifier",
@@ -105,32 +122,10 @@ impl fmt::Display for IndexKind {
             CodeDefinition => "code definition pool",
             TypeParameter => "type parameter",
             MemberCount => "field offset",
-        };
-
-        f.write_str(desc)
-    }
-}
-
-// TODO: is this outdated?
-/// Represents the kind of a signature token.
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum SignatureTokenKind {
-    /// Any sort of owned value that isn't an array (Integer, Bool, Struct etc).
-    Value,
-    /// A reference.
-    Reference,
-    /// A mutable reference.
-    MutableReference,
-}
-
-impl fmt::Display for SignatureTokenKind {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use SignatureTokenKind::*;
-
-        let desc = match self {
-            Value => "value",
-            Reference => "reference",
-            MutableReference => "mutable reference",
+            VariantFieldHandle => "variant field handle",
+            VariantFieldInstantiation => "variant field instantiation",
+            StructVariantHandle => "struct variant handle",
+            StructVariantInstantiation => "struct variant instantiation",
         };
 
         f.write_str(desc)

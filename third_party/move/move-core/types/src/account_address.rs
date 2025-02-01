@@ -11,10 +11,15 @@ use std::{convert::TryFrom, fmt, str::FromStr};
 /// A struct that represents an account address.
 #[derive(Ord, PartialOrd, Eq, PartialEq, Hash, Clone, Copy)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
-#[cfg_attr(any(test, feature = "fuzzing"), derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    any(test, feature = "fuzzing"),
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct AccountAddress([u8; AccountAddress::LENGTH]);
 
 impl AccountAddress {
+    /// Hex address: 0x4
+    pub const FOUR: Self = Self::get_hex_address_four();
     /// The number of bytes in an address.
     /// Default to 16 bytes, can be set to 20 bytes with address20 feature.
     pub const LENGTH: usize = 32;
@@ -22,6 +27,10 @@ impl AccountAddress {
     pub const MAX_ADDRESS: Self = Self([0xFF; Self::LENGTH]);
     /// Hex address: 0x1
     pub const ONE: Self = Self::get_hex_address_one();
+    /// Hex address: 0xA
+    pub const TEN: Self = Self::get_hex_address_ten();
+    /// Hex address: 0x3
+    pub const THREE: Self = Self::get_hex_address_three();
     /// Hex address: 0x2
     pub const TWO: Self = Self::get_hex_address_two();
     /// Hex address: 0x0
@@ -43,6 +52,24 @@ impl AccountAddress {
         Self(addr)
     }
 
+    const fn get_hex_address_ten() -> Self {
+        let mut addr = [0u8; AccountAddress::LENGTH];
+        addr[AccountAddress::LENGTH - 1] = 10u8;
+        Self(addr)
+    }
+
+    const fn get_hex_address_three() -> Self {
+        let mut addr = [0u8; AccountAddress::LENGTH];
+        addr[AccountAddress::LENGTH - 1] = 3u8;
+        Self(addr)
+    }
+
+    const fn get_hex_address_four() -> Self {
+        let mut addr = [0u8; AccountAddress::LENGTH];
+        addr[AccountAddress::LENGTH - 1] = 4u8;
+        Self(addr)
+    }
+
     pub fn random() -> Self {
         let mut rng = OsRng;
         let buf: [u8; Self::LENGTH] = rng.gen();
@@ -51,7 +78,7 @@ impl AccountAddress {
 
     /// Represent an account address in a way that is compliant with the v1 address
     /// standard. The standard is defined as part of AIP-40, read more here:
-    /// https://github.com/aptos-foundation/AIPs/blob/main/aips/aip-40.md
+    /// <https://github.com/aptos-foundation/AIPs/blob/main/aips/aip-40.md>
     ///
     /// In short, all special addresses MUST be represented in SHORT form, e.g.
     ///
@@ -81,7 +108,7 @@ impl AccountAddress {
     /// the addresses in the range from `0x0` to `0xf` (inclusive) are special.
     ///
     /// For more details see the v1 address standard defined as part of AIP-40:
-    /// https://github.com/aptos-foundation/AIPs/blob/main/aips/aip-40.md
+    /// <https://github.com/aptos-foundation/AIPs/blob/main/aips/aip-40.md>
     pub fn is_special(&self) -> bool {
         self.0[..Self::LENGTH - 1].iter().all(|x| *x == 0) && self.0[Self::LENGTH - 1] < 0b10000
     }
@@ -189,7 +216,7 @@ impl AccountAddress {
     /// - Any address without a leading 0x.
     ///
     /// Learn more about the different address formats by reading AIP-40:
-    /// https://github.com/aptos-foundation/AIPs/blob/main/aips/aip-40.md.
+    /// <https://github.com/aptos-foundation/AIPs/blob/main/aips/aip-40.md>.
     pub fn from_str_strict(s: &str) -> Result<Self, AccountAddressParseError> {
         // Assert the string starts with 0x.
         if !s.starts_with("0x") {
@@ -352,7 +379,7 @@ impl FromStr for AccountAddress {
     /// - SHORT is 1 to 63 hex characters inclusive.
     ///
     /// Learn more about the different address formats by reading AIP-40:
-    /// https://github.com/aptos-foundation/AIPs/blob/main/aips/aip-40.md.
+    /// <https://github.com/aptos-foundation/AIPs/blob/main/aips/aip-40.md>.
     fn from_str(s: &str) -> Result<Self, AccountAddressParseError> {
         if !s.starts_with("0x") {
             if s.is_empty() {

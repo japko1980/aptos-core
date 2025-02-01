@@ -3,17 +3,18 @@
 
 use super::{publishing::publish_util::Package, ReliableTransactionSubmitter};
 use crate::{
-    create_account_transaction, publishing::publish_util::PackageHandler, TransactionGenerator,
-    TransactionGeneratorCreator,
+    create_account_transaction,
+    publishing::{entry_point_trait::PreBuiltPackages, publish_util::PackageHandler},
+    RootAccountHandle, TransactionGenerator, TransactionGeneratorCreator,
 };
-use aptos_logger::info;
+use aptos_logger::{error, info};
 use aptos_sdk::{
     transaction_builder::TransactionFactory,
     types::{transaction::SignedTransaction, LocalAccount},
 };
 use async_trait::async_trait;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
-use std::sync::Arc;
+use std::{borrow::Borrow, sync::Arc};
 
 // Fn + Send + Sync, as it will be called from multiple threads simultaneously
 // if you need any coordination, use Arc<RwLock<X>> fields
@@ -35,11 +36,13 @@ pub trait UserModuleTransactionGenerator: Sync + Send {
     /// call directly additional initialization of the module.
     fn initialize_package(
         &mut self,
-        package: &Package,
-        publisher: &mut LocalAccount,
-        txn_factory: &TransactionFactory,
-        rng: &mut StdRng,
-    ) -> Vec<SignedTransaction>;
+        _package: &Package,
+        _publisher: &mut LocalAccount,
+        _txn_factory: &TransactionFactory,
+        _rng: &mut StdRng,
+    ) -> Vec<SignedTransaction> {
+        Vec::new()
+    }
 
     /// Create TransactionGeneratorWorker function, which will be called
     /// to generate transactions to submit.
@@ -49,7 +52,7 @@ pub trait UserModuleTransactionGenerator: Sync + Send {
     /// (like creating and funding additional accounts), you can do so by using provided txn_executor
     async fn create_generator_fn(
         &self,
-        root_account: &mut LocalAccount,
+        root_account: &dyn RootAccountHandle,
         txn_factory: &TransactionFactory,
         txn_executor: &dyn ReliableTransactionSubmitter,
         rng: &mut StdRng,
@@ -127,9 +130,10 @@ impl CustomModulesDelegationGeneratorCreator {
     pub async fn new(
         txn_factory: TransactionFactory,
         init_txn_factory: TransactionFactory,
-        root_account: &mut LocalAccount,
+        root_account: &dyn RootAccountHandle,
         txn_executor: &dyn ReliableTransactionSubmitter,
         num_modules: usize,
+        pre_built: &'static dyn PreBuiltPackages,
         package_name: &str,
         workload: &mut dyn UserModuleTransactionGenerator,
     ) -> Self {
@@ -138,6 +142,7 @@ impl CustomModulesDelegationGeneratorCreator {
             root_account,
             txn_executor,
             num_modules,
+            pre_built,
             package_name,
             None,
         )
@@ -159,9 +164,9 @@ impl CustomModulesDelegationGeneratorCreator {
 
     pub async fn create_worker(
         init_txn_factory: TransactionFactory,
-        root_account: &mut LocalAccount,
+        root_account: &dyn RootAccountHandle,
         txn_executor: &dyn ReliableTransactionSubmitter,
-        packages: &mut Vec<(Package, LocalAccount)>,
+        packages: &mut [(Package, LocalAccount)],
         workload: &mut dyn UserModuleTransactionGenerator,
     ) -> Arc<TransactionGeneratorWorker> {
         let mut rng = StdRng::from_entropy();
@@ -196,28 +201,35 @@ impl CustomModulesDelegationGeneratorCreator {
 
     pub async fn publish_package(
         init_txn_factory: TransactionFactory,
-        root_account: &mut LocalAccount,
+        root_account: &dyn RootAccountHandle,
         txn_executor: &dyn ReliableTransactionSubmitter,
         num_modules: usize,
+        pre_built: &'static dyn PreBuiltPackages,
         package_name: &str,
         publisher_balance: Option<u64>,
     ) -> Vec<(Package, LocalAccount)> {
         let mut rng = StdRng::from_entropy();
         let mut requests_create = Vec::with_capacity(num_modules);
         let mut requests_publish = Vec::with_capacity(num_modules);
-        let mut package_handler = PackageHandler::new(package_name);
+        let mut package_handler = PackageHandler::new(pre_built, package_name);
         let mut packages = Vec::new();
+
+        let publisher_balance = publisher_balance.unwrap_or(
+            2 * init_txn_factory.get_gas_unit_price() * init_txn_factory.get_max_gas_amount(),
+        );
+        let total_funds = (num_modules as u64) * publisher_balance;
+        root_account
+            .approve_funds(total_funds, "funding publishers")
+            .await;
+
         for _i in 0..num_modules {
             let publisher = LocalAccount::generate(&mut rng);
             let publisher_address = publisher.address();
             requests_create.push(create_account_transaction(
-                root_account,
+                root_account.get_root_account().borrow(),
                 publisher_address,
                 &init_txn_factory,
-                publisher_balance.unwrap_or(
-                    2 * init_txn_factory.get_gas_unit_price()
-                        * init_txn_factory.get_max_gas_amount(),
-                ),
+                publisher_balance,
             ));
 
             let package = package_handler.pick_package(&mut rng, publisher.address());
@@ -229,15 +241,29 @@ impl CustomModulesDelegationGeneratorCreator {
             packages.push((package, publisher));
         }
         info!("Creating {} publisher accounts", requests_create.len());
-        txn_executor
-            .execute_transactions(&requests_create)
-            .await
-            .unwrap();
+        // all publishers are created from root account, split it up.
+        for req_chunk in requests_create.chunks(100) {
+            txn_executor
+                .execute_transactions(req_chunk)
+                .await
+                .inspect_err(|err| {
+                    error!(
+                        "Failed to execute creation of publisher accounts: {:#}",
+                        err
+                    )
+                })
+                .unwrap();
+        }
 
-        info!("Publishing {} packages", requests_publish.len());
+        info!(
+            "Publishing {} copies of package {}",
+            requests_publish.len(),
+            package_name
+        );
         txn_executor
             .execute_transactions(&requests_publish)
             .await
+            .inspect_err(|err| error!("Failed to publish test package {}: {:#}", package_name, err))
             .unwrap();
 
         info!("Done publishing {} packages", packages.len());

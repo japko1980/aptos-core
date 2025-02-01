@@ -17,88 +17,38 @@
 mod metrics;
 #[macro_use]
 pub mod schema;
+pub mod batch;
 pub mod iterator;
 
 use crate::{
     metrics::{
         APTOS_SCHEMADB_BATCH_COMMIT_BYTES, APTOS_SCHEMADB_BATCH_COMMIT_LATENCY_SECONDS,
-        APTOS_SCHEMADB_DELETES_SAMPLED, APTOS_SCHEMADB_GET_BYTES,
-        APTOS_SCHEMADB_GET_LATENCY_SECONDS, APTOS_SCHEMADB_ITER_BYTES,
-        APTOS_SCHEMADB_ITER_LATENCY_SECONDS, APTOS_SCHEMADB_PUT_BYTES_SAMPLED,
-        APTOS_SCHEMADB_SEEK_LATENCY_SECONDS,
+        APTOS_SCHEMADB_GET_BYTES, APTOS_SCHEMADB_GET_LATENCY_SECONDS, APTOS_SCHEMADB_ITER_BYTES,
+        APTOS_SCHEMADB_ITER_LATENCY_SECONDS, APTOS_SCHEMADB_SEEK_LATENCY_SECONDS,
     },
     schema::{KeyCodec, Schema, SeekKeyCodec, ValueCodec},
 };
 use anyhow::format_err;
-use aptos_infallible::Mutex;
 use aptos_logger::prelude::*;
-use aptos_storage_interface::Result as DbResult;
+use aptos_metrics_core::TimerHelper;
+use aptos_storage_interface::{AptosDbError, Result as DbResult};
+use batch::{IntoRawBatch, NativeBatch, WriteBatch};
 use iterator::{ScanDirection, SchemaIterator};
-use rand::Rng;
+use rocksdb::ErrorKind;
 /// Type alias to `rocksdb::ReadOptions`. See [`rocksdb doc`](https://github.com/pingcap/rust-rocksdb/blob/master/src/rocksdb_options.rs)
 pub use rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBCompressionType, Options, ReadOptions,
     SliceTransform, DEFAULT_COLUMN_FAMILY_NAME,
 };
-use std::{collections::HashMap, iter::Iterator, path::Path};
+use std::{collections::HashSet, fmt::Debug, iter::Iterator, path::Path};
 
 pub type ColumnFamilyName = &'static str;
 
 #[derive(Debug)]
-enum WriteOp {
-    Value { key: Vec<u8>, value: Vec<u8> },
-    Deletion { key: Vec<u8> },
-}
-
-/// `SchemaBatch` holds a collection of updates that can be applied to a DB atomically. The updates
-/// will be applied in the order in which they are added to the `SchemaBatch`.
-#[derive(Debug)]
-pub struct SchemaBatch {
-    rows: Mutex<HashMap<ColumnFamilyName, Vec<WriteOp>>>,
-}
-
-impl Default for SchemaBatch {
-    fn default() -> Self {
-        Self {
-            rows: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl SchemaBatch {
-    /// Creates an empty batch.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Adds an insert/update operation to the batch.
-    pub fn put<S: Schema>(
-        &self,
-        key: &S::Key,
-        value: &S::Value,
-    ) -> aptos_storage_interface::Result<()> {
-        let key = <S::Key as KeyCodec<S>>::encode_key(key)?;
-        let value = <S::Value as ValueCodec<S>>::encode_value(value)?;
-        self.rows
-            .lock()
-            .entry(S::COLUMN_FAMILY_NAME)
-            .or_default()
-            .push(WriteOp::Value { key, value });
-
-        Ok(())
-    }
-
-    /// Adds a delete operation to the batch.
-    pub fn delete<S: Schema>(&self, key: &S::Key) -> DbResult<()> {
-        let key = <S::Key as KeyCodec<S>>::encode_key(key)?;
-        self.rows
-            .lock()
-            .entry(S::COLUMN_FAMILY_NAME)
-            .or_default()
-            .push(WriteOp::Deletion { key });
-
-        Ok(())
-    }
+enum OpenMode<'a> {
+    ReadWrite,
+    ReadOnly,
+    Secondary(&'a Path),
 }
 
 /// This DB is a schematized RocksDB wrapper where all data passed in and out are typed according to
@@ -114,7 +64,7 @@ impl DB {
         path: impl AsRef<Path>,
         name: &str,
         column_families: Vec<ColumnFamilyName>,
-        db_opts: &rocksdb::Options,
+        db_opts: &Options,
     ) -> DbResult<Self> {
         let db = DB::open_cf(
             db_opts,
@@ -123,9 +73,9 @@ impl DB {
             column_families
                 .iter()
                 .map(|cf_name| {
-                    let mut cf_opts = rocksdb::Options::default();
-                    cf_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-                    rocksdb::ColumnFamilyDescriptor::new((*cf_name).to_string(), cf_opts)
+                    let mut cf_opts = Options::default();
+                    cf_opts.set_compression_type(DBCompressionType::Lz4);
+                    ColumnFamilyDescriptor::new((*cf_name).to_string(), cf_opts)
                 })
                 .collect(),
         )?;
@@ -133,49 +83,100 @@ impl DB {
     }
 
     pub fn open_cf(
-        db_opts: &rocksdb::Options,
+        db_opts: &Options,
         path: impl AsRef<Path>,
         name: &str,
-        cfds: Vec<rocksdb::ColumnFamilyDescriptor>,
+        cfds: Vec<ColumnFamilyDescriptor>,
     ) -> DbResult<DB> {
-        let inner = rocksdb::DB::open_cf_descriptors(db_opts, path.de_unc(), cfds)?;
-        Ok(Self::log_construct(name, inner))
+        Self::open_cf_impl(db_opts, path, name, cfds, OpenMode::ReadWrite)
     }
 
     /// Open db in readonly mode
     /// Note that this still assumes there's only one process that opens the same DB.
     /// See `open_as_secondary`
     pub fn open_cf_readonly(
-        opts: &rocksdb::Options,
+        opts: &Options,
         path: impl AsRef<Path>,
         name: &str,
-        cfs: Vec<ColumnFamilyName>,
+        cfds: Vec<ColumnFamilyDescriptor>,
     ) -> DbResult<DB> {
-        let error_if_log_file_exists = false;
-        let inner =
-            rocksdb::DB::open_cf_for_read_only(opts, path.de_unc(), cfs, error_if_log_file_exists)?;
-
-        Ok(Self::log_construct(name, inner))
+        Self::open_cf_impl(opts, path, name, cfds, OpenMode::ReadOnly)
     }
 
     pub fn open_cf_as_secondary<P: AsRef<Path>>(
-        opts: &rocksdb::Options,
+        opts: &Options,
         primary_path: P,
         secondary_path: P,
         name: &str,
-        cfs: Vec<ColumnFamilyName>,
+        cfds: Vec<ColumnFamilyDescriptor>,
     ) -> DbResult<DB> {
-        let inner = rocksdb::DB::open_cf_as_secondary(
+        Self::open_cf_impl(
             opts,
-            primary_path.de_unc(),
-            secondary_path.de_unc(),
-            cfs,
-        )?;
-        Ok(Self::log_construct(name, inner))
+            primary_path,
+            name,
+            cfds,
+            OpenMode::Secondary(secondary_path.as_ref()),
+        )
     }
 
-    fn log_construct(name: &str, inner: rocksdb::DB) -> DB {
-        info!(rocksdb_name = name, "Opened RocksDB.");
+    fn open_cf_impl(
+        db_opts: &Options,
+        path: impl AsRef<Path>,
+        name: &str,
+        cfds: Vec<ColumnFamilyDescriptor>,
+        open_mode: OpenMode,
+    ) -> DbResult<DB> {
+        // ignore error, since it'll fail to list cfs on the first open
+        let existing_cfs = rocksdb::DB::list_cf(db_opts, path.de_unc()).unwrap_or_default();
+
+        let unrecognized_cfds = existing_cfs
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<HashSet<&str>>()
+            .difference(&cfds.iter().map(|cfd| cfd.name()).collect())
+            .map(|cf| {
+                warn!("Unrecognized CF: {}", cf);
+
+                let mut cf_opts = Options::default();
+                cf_opts.set_compression_type(DBCompressionType::Lz4);
+                ColumnFamilyDescriptor::new(cf.to_string(), cf_opts)
+            })
+            .collect::<Vec<_>>();
+        let all_cfds = cfds.into_iter().chain(unrecognized_cfds);
+
+        let inner = {
+            use rocksdb::DB;
+            use OpenMode::*;
+
+            match open_mode {
+                ReadWrite => DB::open_cf_descriptors(db_opts, path.de_unc(), all_cfds),
+                ReadOnly => {
+                    DB::open_cf_descriptors_read_only(
+                        db_opts,
+                        path.de_unc(),
+                        all_cfds,
+                        false, /* error_if_log_file_exist */
+                    )
+                },
+                Secondary(secondary_path) => DB::open_cf_descriptors_as_secondary(
+                    db_opts,
+                    path.de_unc(),
+                    secondary_path,
+                    all_cfds,
+                ),
+            }
+        }
+        .into_db_res()?;
+
+        Ok(Self::log_construct(name, open_mode, inner))
+    }
+
+    fn log_construct(name: &str, open_mode: OpenMode, inner: rocksdb::DB) -> DB {
+        info!(
+            rocksdb_name = name,
+            open_mode = ?open_mode,
+            "Opened RocksDB."
+        );
         DB {
             name: name.to_string(),
             inner,
@@ -191,7 +192,7 @@ impl DB {
         let k = <S::Key as KeyCodec<S>>::encode_key(schema_key)?;
         let cf_handle = self.get_cf_handle(S::COLUMN_FAMILY_NAME)?;
 
-        let result = self.inner.get_cf(cf_handle, k)?;
+        let result = self.inner.get_cf(cf_handle, k).into_db_res()?;
         APTOS_SCHEMADB_GET_BYTES
             .with_label_values(&[S::COLUMN_FAMILY_NAME])
             .observe(result.as_ref().map_or(0.0, |v| v.len() as f64));
@@ -202,11 +203,23 @@ impl DB {
             .map_err(Into::into)
     }
 
+    pub fn new_native_batch(&self) -> NativeBatch {
+        NativeBatch::new(self)
+    }
+
     /// Writes single record.
     pub fn put<S: Schema>(&self, key: &S::Key, value: &S::Value) -> DbResult<()> {
         // Not necessary to use a batch, but we'd like a central place to bump counters.
-        let batch = SchemaBatch::new();
+        let mut batch = self.new_native_batch();
         batch.put::<S>(key, value)?;
+        self.write_schemas(batch)
+    }
+
+    /// Deletes a single record.
+    pub fn delete<S: Schema>(&self, key: &S::Key) -> DbResult<()> {
+        // Not necessary to use a batch, but we'd like a central place to bump counters.
+        let mut batch = self.new_native_batch();
+        batch.delete::<S>(key)?;
         self.write_schemas(batch)
     }
 
@@ -223,67 +236,37 @@ impl DB {
     }
 
     /// Returns a forward [`SchemaIterator`] on a certain schema.
-    pub fn iter<S: Schema>(&self, opts: ReadOptions) -> DbResult<SchemaIterator<S>> {
+    pub fn iter<S: Schema>(&self) -> DbResult<SchemaIterator<S>> {
+        self.iter_with_opts(ReadOptions::default())
+    }
+
+    /// Returns a forward [`SchemaIterator`] on a certain schema, with non-default ReadOptions
+    pub fn iter_with_opts<S: Schema>(&self, opts: ReadOptions) -> DbResult<SchemaIterator<S>> {
         self.iter_with_direction::<S>(opts, ScanDirection::Forward)
     }
 
     /// Returns a backward [`SchemaIterator`] on a certain schema.
-    pub fn rev_iter<S: Schema>(&self, opts: ReadOptions) -> DbResult<SchemaIterator<S>> {
+    pub fn rev_iter<S: Schema>(&self) -> DbResult<SchemaIterator<S>> {
+        self.rev_iter_with_opts(ReadOptions::default())
+    }
+
+    /// Returns a backward [`SchemaIterator`] on a certain schema, with non-default ReadOptions
+    pub fn rev_iter_with_opts<S: Schema>(&self, opts: ReadOptions) -> DbResult<SchemaIterator<S>> {
         self.iter_with_direction::<S>(opts, ScanDirection::Backward)
     }
 
     /// Writes a group of records wrapped in a [`SchemaBatch`].
-    pub fn write_schemas(&self, batch: SchemaBatch) -> DbResult<()> {
-        // Function to determine if the counter should be sampled based on a sampling percentage
-        fn should_sample(sampling_percentage: usize) -> bool {
-            // Generate a random number between 0 and 100
-            let random_value = rand::thread_rng().gen_range(0, 100);
+    pub fn write_schemas(&self, batch: impl IntoRawBatch) -> DbResult<()> {
+        let _timer = APTOS_SCHEMADB_BATCH_COMMIT_LATENCY_SECONDS.timer_with(&[&self.name]);
 
-            // Sample the counter if the random value is less than the sampling percentage
-            random_value <= sampling_percentage
-        }
+        let raw_batch = batch.into_raw_batch(self)?;
 
-        let _timer = APTOS_SCHEMADB_BATCH_COMMIT_LATENCY_SECONDS
-            .with_label_values(&[&self.name])
-            .start_timer();
-        let rows_locked = batch.rows.lock();
-        let sampling_rate_pct = 1;
-        let sampled_kv_bytes = should_sample(sampling_rate_pct);
+        let serialized_size = raw_batch.inner.size_in_bytes();
+        self.inner
+            .write_opt(raw_batch.inner, &default_write_options())
+            .into_db_res()?;
 
-        let mut db_batch = rocksdb::WriteBatch::default();
-        for (cf_name, rows) in rows_locked.iter() {
-            let cf_handle = self.get_cf_handle(cf_name)?;
-            for write_op in rows {
-                match write_op {
-                    WriteOp::Value { key, value } => db_batch.put_cf(cf_handle, key, value),
-                    WriteOp::Deletion { key } => db_batch.delete_cf(cf_handle, key),
-                }
-            }
-        }
-        let serialized_size = db_batch.size_in_bytes();
-
-        self.inner.write_opt(db_batch, &default_write_options())?;
-
-        // Bump counters only after DB write succeeds.
-        if sampled_kv_bytes {
-            for (cf_name, rows) in rows_locked.iter() {
-                for write_op in rows {
-                    match write_op {
-                        WriteOp::Value { key, value } => {
-                            APTOS_SCHEMADB_PUT_BYTES_SAMPLED
-                                .with_label_values(&[cf_name])
-                                .observe((key.len() + value.len()) as f64);
-                        },
-                        WriteOp::Deletion { key: _ } => {
-                            APTOS_SCHEMADB_DELETES_SAMPLED
-                                .with_label_values(&[cf_name])
-                                .inc();
-                        },
-                    }
-                }
-            }
-        }
-
+        raw_batch.stats.commit();
         APTOS_SCHEMADB_BATCH_COMMIT_BYTES
             .with_label_values(&[&self.name])
             .observe(serialized_size as f64);
@@ -306,12 +289,15 @@ impl DB {
     /// Flushes memtable data. This is only used for testing `get_approximate_sizes_cf` in unit
     /// tests.
     pub fn flush_cf(&self, cf_name: &str) -> DbResult<()> {
-        Ok(self.inner.flush_cf(self.get_cf_handle(cf_name)?)?)
+        self.inner
+            .flush_cf(self.get_cf_handle(cf_name)?)
+            .into_db_res()
     }
 
     pub fn get_property(&self, cf_name: &str, property_name: &str) -> DbResult<u64> {
         self.inner
-            .property_int_value_cf(self.get_cf_handle(cf_name)?, property_name)?
+            .property_int_value_cf(self.get_cf_handle(cf_name)?, property_name)
+            .into_db_res()?
             .ok_or_else(|| {
                 aptos_storage_interface::AptosDbError::Other(
                     format!(
@@ -325,7 +311,10 @@ impl DB {
 
     /// Creates new physical DB checkpoint in directory specified by `path`.
     pub fn create_checkpoint<P: AsRef<Path>>(&self, path: P) -> DbResult<()> {
-        rocksdb::checkpoint::Checkpoint::new(&self.inner)?.create_checkpoint(path)?;
+        rocksdb::checkpoint::Checkpoint::new(&self.inner)
+            .into_db_res()?
+            .create_checkpoint(path)
+            .into_db_res()?;
         Ok(())
     }
 }
@@ -353,3 +342,34 @@ trait DeUnc: AsRef<Path> {
 }
 
 impl<T> DeUnc for T where T: AsRef<Path> {}
+
+fn to_db_err(rocksdb_err: rocksdb::Error) -> AptosDbError {
+    match rocksdb_err.kind() {
+        ErrorKind::Incomplete => AptosDbError::RocksDbIncompleteResult(rocksdb_err.to_string()),
+        ErrorKind::NotFound
+        | ErrorKind::Corruption
+        | ErrorKind::NotSupported
+        | ErrorKind::InvalidArgument
+        | ErrorKind::IOError
+        | ErrorKind::MergeInProgress
+        | ErrorKind::ShutdownInProgress
+        | ErrorKind::TimedOut
+        | ErrorKind::Aborted
+        | ErrorKind::Busy
+        | ErrorKind::Expired
+        | ErrorKind::TryAgain
+        | ErrorKind::CompactionTooLarge
+        | ErrorKind::ColumnFamilyDropped
+        | ErrorKind::Unknown => AptosDbError::OtherRocksDbError(rocksdb_err.to_string()),
+    }
+}
+
+trait IntoDbResult<T> {
+    fn into_db_res(self) -> DbResult<T>;
+}
+
+impl<T> IntoDbResult<T> for Result<T, rocksdb::Error> {
+    fn into_db_res(self) -> DbResult<T> {
+        self.map_err(to_db_err)
+    }
+}

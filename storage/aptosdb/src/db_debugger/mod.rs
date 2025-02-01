@@ -5,8 +5,10 @@ pub mod checkpoint;
 mod common;
 mod examine;
 pub mod ledger;
+pub mod state_kv;
 pub mod state_tree;
 pub mod truncate;
+pub mod validation;
 
 use aptos_storage_interface::Result;
 use clap::Parser;
@@ -22,6 +24,9 @@ pub enum Cmd {
     #[clap(subcommand)]
     StateTree(state_tree::Cmd),
 
+    #[clap(subcommand)]
+    StateKv(state_kv::Cmd),
+
     Checkpoint(checkpoint::Cmd),
 
     #[clap(subcommand)]
@@ -31,16 +36,21 @@ pub enum Cmd {
 
     #[clap(subcommand)]
     Examine(examine::Cmd),
+
+    #[clap(subcommand)]
+    IndexerValidation(validation::Cmd),
 }
 
 impl Cmd {
     pub fn run(self) -> Result<()> {
         match self {
             Cmd::StateTree(cmd) => cmd.run(),
+            Cmd::StateKv(cmd) => cmd.run(),
             Cmd::Checkpoint(cmd) => cmd.run(),
             Cmd::Ledger(cmd) => cmd.run(),
             Cmd::Truncate(cmd) => cmd.run(),
             Cmd::Examine(cmd) => cmd.run(),
+            Cmd::IndexerValidation(cmd) => cmd.run(),
         }
     }
 }

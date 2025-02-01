@@ -2,6 +2,7 @@
 // Parts of the project are originally copyright © Meta Platforms, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::create_k8s_client;
 use crate::{
     backend::k8s::stateful_set, get_free_port, scale_stateful_set_replicas, FullNode,
     HealthCheckError, Node, NodeExt, Result, Validator, Version, KUBECTL_BIN, LOCALHOST,
@@ -14,12 +15,16 @@ use aptos_logger::info;
 use aptos_rest_client::Client as RestClient;
 use aptos_sdk::types::PeerId;
 use aptos_state_sync_driver::metadata_storage::STATE_SYNC_DB_NAME;
+use futures::try_join;
+use k8s_openapi::api::core::v1::Pod;
+use kube::Api;
 use reqwest::Url;
 use serde_json::Value;
 use std::{
     fmt::{Debug, Formatter},
     process::{Command, Stdio},
     str::FromStr,
+    sync::atomic::{AtomicU32, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -32,7 +37,7 @@ pub struct K8sNode {
     pub(crate) peer_id: PeerId,
     pub(crate) index: usize,
     pub(crate) service_name: String,
-    pub(crate) rest_api_port: u32,
+    pub(crate) rest_api_port: AtomicU32,
     pub version: Version,
     pub namespace: String,
     // whether this node has HAProxy in front of it
@@ -43,7 +48,7 @@ pub struct K8sNode {
 
 impl K8sNode {
     fn rest_api_port(&self) -> u32 {
-        self.rest_api_port
+        self.rest_api_port.load(Ordering::SeqCst)
     }
 
     fn service_name(&self) -> String {
@@ -117,6 +122,29 @@ impl K8sNode {
         };
         self.port_forward(self.rest_api_port(), remote_rest_api_port)
     }
+
+    /// Wait until the pod is running
+    async fn wait_for_pod_running(&self, deadline: Instant) -> Result<()> {
+        let kube_client = create_k8s_client().await?;
+        let pod_api: Api<Pod> = Api::namespaced(kube_client, self.namespace());
+        let pod_name = format!("{}-0", self.stateful_set_name());
+
+        while Instant::now() < deadline {
+            if let Some(status) = pod_api.get_status(&pod_name).await?.status {
+                if let Some(phase) = status.phase {
+                    if phase == "Running" {
+                        return Ok(());
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        Err(anyhow!(
+            "Timed out waiting for pod {} to be running",
+            pod_name
+        ))
+    }
 }
 
 #[async_trait::async_trait]
@@ -133,19 +161,35 @@ impl Node for K8sNode {
         self.peer_id
     }
 
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&self) -> Result<()> {
         scale_stateful_set_replicas(self.stateful_set_name(), self.namespace(), 1).await?;
         // need to port-forward again since the node is coming back
         // note that we will get a new port
         if self.port_forward_enabled {
-            self.rest_api_port = get_free_port();
+            self.rest_api_port.store(get_free_port(), Ordering::SeqCst);
             self.port_forward_rest_api()?;
         }
-        self.wait_until_healthy(Instant::now() + Duration::from_secs(60))
-            .await
+
+        let infra_deadline = Instant::now() + Duration::from_secs(120);
+        let health_deadline = Instant::now() + Duration::from_secs(180);
+
+        try_join!(
+            async {
+                self.wait_for_pod_running(infra_deadline)
+                    .await
+                    .map_err(|e| anyhow!("Infrastructure error - pod failed to start: {}", e))
+            },
+            async {
+                self.wait_until_healthy(health_deadline)
+                    .await
+                    .map_err(|e| anyhow!("Health check failed - node failed to start: {}", e))
+            }
+        )?;
+
+        Ok(())
     }
 
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&self) -> Result<()> {
         info!("going to stop node {}", self.stateful_set_name());
         scale_stateful_set_replicas(self.stateful_set_name(), self.namespace(), 0).await
     }
@@ -164,7 +208,7 @@ impl Node for K8sNode {
             .expect("Invalid URL.")
     }
 
-    async fn clear_storage(&mut self) -> Result<()> {
+    async fn clear_storage(&self) -> Result<()> {
         // Remove all storage files
         let ledger_db_path = format!("{}/db/{}", APTOS_DATA_DIR, LEDGER_DB_NAME);
         let state_db_path = format!("{}/db/{}", APTOS_DATA_DIR, STATE_MERKLE_DB_NAME);
@@ -236,7 +280,7 @@ impl Node for K8sNode {
         Ok(port as u64)
     }
 
-    async fn health_check(&mut self) -> Result<(), HealthCheckError> {
+    async fn health_check(&self) -> Result<(), HealthCheckError> {
         self.rest_client()
             .get_ledger_information()
             .await
@@ -256,17 +300,21 @@ impl Node for K8sNode {
         .unwrap()
     }
 
-    async fn get_identity(&mut self) -> Result<String> {
+    async fn get_identity(&self) -> Result<String> {
         stateful_set::get_identity(self.stateful_set_name(), self.namespace()).await
     }
 
-    async fn set_identity(&mut self, k8s_secret_name: String) -> Result<()> {
+    async fn set_identity(&self, k8s_secret_name: String) -> Result<()> {
         stateful_set::set_identity(
             self.stateful_set_name(),
             self.namespace(),
             k8s_secret_name.as_str(),
         )
         .await
+    }
+
+    fn service_name(&self) -> Option<String> {
+        Some(self.service_name.clone())
     }
 }
 

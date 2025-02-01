@@ -23,8 +23,10 @@ fn test_refunds() {
         ],
         vec![],
     );
+    // Note: This test uses a lot of execution gas so we need to bump the limit in order for it
+    //       to pass.
     h.modify_gas_schedule(|params| {
-        params.vm.txn.max_execution_gas = 10_000_000_000.into();
+        params.vm.txn.max_execution_gas = 40_000_000_000.into();
         params.vm.txn.storage_fee_per_state_byte = 0.into(); // tested in DiskSpacePricing.
     });
     let mod_addr = AccountAddress::from_hex_literal("0xcafe").unwrap();
@@ -95,9 +97,8 @@ const LEEWAY: u64 = 2000;
 
 fn read_slot_fee_from_gas_schedule(h: &MoveHarness) -> u64 {
     let slot_fee = h
-        .new_vm()
-        .gas_params()
-        .unwrap()
+        .get_gas_params()
+        .1
         .vm
         .txn
         .storage_fee_per_state_slot
@@ -158,7 +159,7 @@ fn assert_result(
     for (_state_key, write_op) in txn_out.write_set() {
         match write_op {
             WriteOp::Creation { .. } => creates += 1,
-            WriteOp::Deletion { metadata } => {
+            WriteOp::Deletion(metadata) => {
                 if metadata.is_none() {
                     panic!("This test expects all deletions to have metadata")
                 }

@@ -26,20 +26,16 @@ spec aptos_framework::version {
         use std::signer;
         use aptos_framework::chain_status;
         use aptos_framework::timestamp;
-        use aptos_framework::stake;
         use aptos_framework::coin::CoinInfo;
         use aptos_framework::aptos_coin::AptosCoin;
-        use aptos_framework::transaction_fee;
         use aptos_framework::staking_config;
         use aptos_framework::reconfiguration;
 
         // TODO: set because of timeout (property proved)
         pragma verify_duration_estimate = 120;
-        include transaction_fee::RequiresCollectedFeesPerValueLeqBlockAptosSupply;
         include staking_config::StakingRewardsConfigRequirement;
-        requires chain_status::is_operating();
+        requires chain_status::is_genesis();
         requires timestamp::spec_now_microseconds() >= reconfiguration::last_reconfiguration_time();
-        requires exists<stake::ValidatorFees>(@aptos_framework);
         requires exists<CoinInfo<AptosCoin>>(@aptos_framework);
 
         aborts_if !exists<SetVersionCapability>(signer::address_of(account));
@@ -64,6 +60,19 @@ spec aptos_framework::version {
         ensures exists<SetVersionCapability>(@aptos_framework);
         ensures global<Version>(@aptos_framework) == Version { major: initial_version };
         ensures global<SetVersionCapability>(@aptos_framework) == SetVersionCapability {};
+    }
+
+    spec set_for_next_epoch(account: &signer, major: u64) {
+        aborts_if !exists<SetVersionCapability>(signer::address_of(account));
+        aborts_if !exists<Version>(@aptos_framework);
+        aborts_if global<Version>(@aptos_framework).major >= major;
+        aborts_if !exists<config_buffer::PendingConfigs>(@aptos_framework);
+    }
+
+    spec on_new_epoch(framework: &signer) {
+        requires @aptos_framework == std::signer::address_of(framework);
+        include config_buffer::OnNewEpochRequirement<Version>;
+        aborts_if false;
     }
 
     /// This module turns on `aborts_if_is_strict`, so need to add spec for test function `initialize_for_test`.

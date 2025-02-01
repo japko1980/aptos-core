@@ -1,3 +1,4 @@
+// Copyright (c) Aptos Foundation
 // Copyright (c) The Diem Core Contributors
 // Copyright (c) The Move Contributors
 // SPDX-License-Identifier: Apache-2.0
@@ -11,15 +12,16 @@ use crate::{
     source_package::parsed_manifest::PackageName,
     CompilerConfig,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use move_compiler::{
     compiled_unit::AnnotatedCompiledUnit,
     diagnostics::{report_diagnostics_to_color_buffer, report_warnings, FilesSourceText},
     Compiler,
 };
+use move_compiler_v2::external_checks::ExternalChecks;
 use move_model::model;
 use petgraph::algo::toposort;
-use std::{collections::BTreeSet, io::Write, path::Path};
+use std::{collections::BTreeSet, io::Write, path::Path, sync::Arc};
 #[cfg(feature = "evm-backend")]
 use {
     colored::Colorize,
@@ -36,7 +38,16 @@ pub struct BuildPlan {
     resolution_graph: ResolvedGraph,
 }
 
-pub type CompilerDriverResult = anyhow::Result<(FilesSourceText, Vec<AnnotatedCompiledUnit>)>;
+/// A container for compiler results from either V1 or V2,
+/// with all info needed for building various artifacts.
+pub type CompilerDriverResult = anyhow::Result<(
+    // The names and contents of all source files.
+    FilesSourceText,
+    // The compilation artifacts, including V1 intermediate ASTs.
+    Vec<AnnotatedCompiledUnit>,
+    // For compilation with V2, compiled program model.
+    Option<model::GlobalEnv>,
+)>;
 
 #[cfg(feature = "evm-backend")]
 fn should_recompile(
@@ -116,27 +127,35 @@ impl BuildPlan {
         self.compile_with_driver(
             writer,
             config,
-            |compiler| compiler.build_and_report(),
+            vec![],
+            |compiler| {
+                let (files, units) = compiler.build_and_report()?;
+                Ok((files, units, None))
+            },
             build_and_report_v2_driver,
         )
         .map(|(package, _)| package)
     }
 
-    /// Compilation process does not exit even if warnings/failures are encountered
+    /// Compilation process does not exit even if warnings/failures are encountered.
+    /// External checks on Move code can be provided via `external_checks`, these checks
+    /// are only run when using the compiler v2.
     pub fn compile_no_exit<W: Write>(
         &self,
         config: &CompilerConfig,
+        external_checks: Vec<Arc<dyn ExternalChecks>>,
         writer: &mut W,
     ) -> Result<(CompiledPackage, Option<model::GlobalEnv>)> {
         self.compile_with_driver(
             writer,
             config,
+            external_checks,
             |compiler| {
                 let (files, units_res) = compiler.build()?;
                 match units_res {
                     Ok((units, warning_diags)) => {
                         report_warnings(&files, warning_diags);
-                        Ok((files, units))
+                        Ok((files, units, None))
                     },
                     Err(error_diags) => {
                         assert!(!error_diags.is_empty());
@@ -156,6 +175,7 @@ impl BuildPlan {
         &self,
         writer: &mut W,
         config: &CompilerConfig,
+        external_checks: Vec<Arc<dyn ExternalChecks>>,
         compiler_driver_v1: impl FnMut(Compiler) -> CompilerDriverResult,
         compiler_driver_v2: impl FnMut(move_compiler_v2::Options) -> CompilerDriverResult,
     ) -> Result<(CompiledPackage, Option<model::GlobalEnv>)> {
@@ -200,6 +220,7 @@ impl BuildPlan {
             root_package.clone(),
             transitive_dependencies,
             config,
+            external_checks,
             &self.resolution_graph,
             compiler_driver_v1,
             compiler_driver_v2,
@@ -440,9 +461,18 @@ impl BuildPlan {
     // compilation flags
     fn clean(build_root: &Path, keep_paths: BTreeSet<PackageName>) -> Result<()> {
         for dir in std::fs::read_dir(build_root)? {
-            let path = dir?.path();
-            if !keep_paths.iter().any(|name| path.ends_with(name.as_str())) {
-                std::fs::remove_dir_all(&path)?;
+            let path = dir
+                .with_context(|| {
+                    format!(
+                        "Cleaning subdirectories of build root {}",
+                        build_root.to_string_lossy()
+                    )
+                })?
+                .path();
+            if path.is_dir() && !keep_paths.iter().any(|name| path.ends_with(name.as_str())) {
+                std::fs::remove_dir_all(&path).with_context(|| {
+                    format!("When deleting directory {}", path.to_string_lossy())
+                })?;
             }
         }
         Ok(())

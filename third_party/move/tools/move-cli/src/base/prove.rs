@@ -6,8 +6,9 @@ use anyhow::bail;
 use clap::Parser;
 use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
 use colored::Colorize;
+use move_model::metadata::{CompilerVersion, LanguageVersion};
 use move_package::{BuildConfig, ModelConfig};
-use move_prover::run_move_prover_with_model;
+use move_prover::run_move_prover_with_model_v2;
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -127,7 +128,10 @@ impl ProverTest {
             for_test: true,
             options: Some(ProverOptions::Options(std::mem::take(&mut self.options))),
         };
-        let res = cmd.execute(Some(pkg_path), move_package::BuildConfig::default());
+        let mut build_config = BuildConfig::default();
+        build_config.compiler_config.language_version = Some(LanguageVersion::latest_stable());
+        build_config.compiler_config.compiler_version = Some(CompilerVersion::latest_stable());
+        let res = cmd.execute(Some(pkg_path), build_config);
         std::env::set_current_dir(saved_cd).expect("restore current directory");
         res.unwrap()
     }
@@ -190,9 +194,13 @@ pub fn run_move_prover(
         options.set_quiet();
     }
     let now = Instant::now();
-    let model = config.move_model_for_package(path, ModelConfig {
+    let compiler_version = config.compiler_config.compiler_version.unwrap_or_default();
+    let language_version = config.compiler_config.language_version.unwrap_or_default();
+    let mut model = config.move_model_for_package(path, ModelConfig {
         all_files_as_targets: false,
         target_filter: target_filter.clone(),
+        compiler_version,
+        language_version,
     })?;
     let _temp_dir_holder = if for_test {
         // Need to ensure a distinct output.bpl file for concurrent execution. In non-test
@@ -208,7 +216,7 @@ pub fn run_move_prover(
     } else {
         None
     };
-    let res = run_move_prover_with_model(&model, &mut error_writer, options, Some(now));
+    let res = run_move_prover_with_model_v2(&mut model, &mut error_writer, options, now);
     if for_test {
         let basedir = path
             .file_name()
@@ -222,7 +230,7 @@ pub fn run_move_prover(
             } else {
                 "FAILURE".bold().red()
             },
-            model.get_target_modules().len(),
+            model.get_primary_target_modules().len(),
             basedir,
             now.elapsed().as_secs_f64()
         )?;

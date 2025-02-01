@@ -5,7 +5,10 @@ use crate::measurements::GasMeasurements;
 use anyhow::{anyhow, Result};
 use aptos_cached_packages::aptos_stdlib;
 use aptos_framework::BuiltPackage;
-use aptos_language_e2e_tests::{account::Account, executor::FakeExecutor};
+use aptos_language_e2e_tests::{
+    account::Account,
+    executor::{ExecFuncTimerDynamicArgs, FakeExecutor, GasMeterType},
+};
 use aptos_types::transaction::TransactionPayload;
 use move_binary_format::{file_format::SignatureToken, CompiledModule};
 use move_core_types::{
@@ -91,13 +94,17 @@ pub fn execute_user_txn(
     iterations: u64,
     args: Vec<Vec<u8>>,
 ) -> u128 {
-    let elapsed = executor.exec_func_record_running_time(
-        module_name,
-        function_name,
-        vec![],
-        args,
-        iterations,
-    );
+    let elapsed = executor
+        .exec_func_record_running_time(
+            module_name,
+            function_name,
+            vec![],
+            args,
+            iterations,
+            ExecFuncTimerDynamicArgs::NoArgs,
+            GasMeterType::UnmeteredGasMeter,
+        )
+        .elapsed_micros();
     println!("running time (microseconds): {}", elapsed);
     elapsed
 }

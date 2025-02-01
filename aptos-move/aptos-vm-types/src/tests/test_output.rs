@@ -3,7 +3,10 @@
 
 use crate::{
     output::VMOutput,
-    tests::utils::{as_state_key, build_vm_output, mock_add, mock_create_with_layout, mock_modify},
+    tests::utils::{
+        as_state_key, build_vm_output, mock_add, mock_create_with_layout, mock_modify,
+        mock_module_modify,
+    },
 };
 use aptos_aggregator::delta_change_set::serialize;
 use aptos_language_e2e_tests::data_store::FakeDataStore;
@@ -16,7 +19,6 @@ use std::collections::BTreeMap;
 
 fn assert_eq_outputs(vm_output: &VMOutput, txn_output: TransactionOutput) {
     let vm_output_writes = &vm_output
-        .change_set()
         .concrete_write_set_iter()
         .map(|(k, v)| {
             (
@@ -40,7 +42,7 @@ fn test_ok_output_equality_no_deltas() {
     let state_view = FakeDataStore::default();
     let vm_output = build_vm_output(
         vec![mock_create_with_layout("0", 0, None)],
-        vec![mock_modify("1", 1)],
+        vec![mock_module_modify("1", 1)],
         vec![],
         vec![mock_modify("2", 2)],
         vec![],
@@ -75,7 +77,7 @@ fn test_ok_output_equality_with_deltas() {
 
     let vm_output = build_vm_output(
         vec![mock_create_with_layout("0", 0, None)],
-        vec![mock_modify("1", 1)],
+        vec![mock_module_modify("1", 1)],
         vec![],
         vec![mock_modify("2", 2)],
         vec![mock_add(delta_key, 300)],
@@ -97,23 +99,18 @@ fn test_ok_output_equality_with_deltas() {
     let expected_aggregator_write_set =
         BTreeMap::from([mock_modify("2", 2), mock_modify("3", 400)]);
     assert_eq!(
-        materialized_vm_output.change_set().resource_write_set(),
-        vm_output.change_set().resource_write_set()
+        materialized_vm_output.resource_write_set(),
+        vm_output.resource_write_set()
     );
     assert_eq!(
-        materialized_vm_output.change_set().module_write_set(),
-        vm_output.change_set().module_write_set()
+        materialized_vm_output.module_write_set(),
+        vm_output.module_write_set()
     );
     assert_eq!(
-        materialized_vm_output
-            .change_set()
-            .aggregator_v1_write_set(),
+        materialized_vm_output.aggregator_v1_write_set(),
         &expected_aggregator_write_set
     );
-    assert!(materialized_vm_output
-        .change_set()
-        .aggregator_v1_delta_set()
-        .is_empty());
+    assert!(materialized_vm_output.aggregator_v1_delta_set().is_empty());
     assert_eq!(
         vm_output.fee_statement(),
         materialized_vm_output.fee_statement()

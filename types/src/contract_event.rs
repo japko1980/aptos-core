@@ -3,11 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    account_config::{DepositEvent, NewBlockEvent, NewEpochEvent, WithdrawEvent},
+    account_config::{
+        DepositEvent, NewBlockEvent, NewEpochEvent, WithdrawEvent, NEW_EPOCH_EVENT_MOVE_TYPE_TAG,
+        NEW_EPOCH_EVENT_V2_MOVE_TYPE_TAG,
+    },
     dkg::DKGStartEvent,
     event::EventKey,
     jwks::ObservedJWKsUpdated,
-    on_chain_config::new_epoch_event_key,
     transaction::Version,
 };
 use anyhow::{bail, Error, Result};
@@ -21,14 +23,14 @@ use once_cell::sync::Lazy;
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest_derive::Arbitrary;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{convert::TryFrom, str::FromStr};
+use std::{convert::TryFrom, ops::Deref, str::FromStr};
 
 pub static FEE_STATEMENT_EVENT_TYPE: Lazy<TypeTag> = Lazy::new(|| {
     TypeTag::Struct(Box::new(StructTag {
         address: CORE_CODE_ADDRESS,
         module: ident_str!("transaction_fee").to_owned(),
         name: ident_str!("FeeStatement").to_owned(),
-        type_params: vec![],
+        type_args: vec![],
     }))
 });
 
@@ -156,15 +158,18 @@ impl ContractEvent {
     }
 
     pub fn is_new_epoch_event(&self) -> bool {
-        match self {
-            ContractEvent::V1(event) => *event.key() == new_epoch_event_key(),
-            ContractEvent::V2(_event) => false,
-        }
+        self.type_tag() == NEW_EPOCH_EVENT_MOVE_TYPE_TAG.deref()
+            || self.type_tag() == NEW_EPOCH_EVENT_V2_MOVE_TYPE_TAG.deref()
+    }
+
+    pub fn expect_new_block_event(&self) -> Result<NewBlockEvent> {
+        NewBlockEvent::try_from_bytes(self.event_data())
     }
 }
 
 /// Entry produced via a call to the `emit_event` builtin.
 #[derive(Hash, Clone, Eq, PartialEq, Serialize, Deserialize, CryptoHasher)]
+#[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
 pub struct ContractEventV1 {
     /// The unique key that the event was emitted to
     key: EventKey,
@@ -284,17 +289,6 @@ impl TryFrom<&ContractEvent> for NewBlockEvent {
     }
 }
 
-impl From<(u64, NewEpochEvent)> for ContractEvent {
-    fn from((seq_num, event): (u64, NewEpochEvent)) -> Self {
-        Self::new_v1(
-            new_epoch_event_key(),
-            seq_num,
-            TypeTag::from(NewEpochEvent::struct_tag()),
-            bcs::to_bytes(&event).unwrap(),
-        )
-    }
-}
-
 impl TryFrom<&ContractEvent> for DKGStartEvent {
     type Error = Error;
 
@@ -317,14 +311,10 @@ impl TryFrom<&ContractEvent> for NewEpochEvent {
     type Error = Error;
 
     fn try_from(event: &ContractEvent) -> Result<Self> {
-        match event {
-            ContractEvent::V1(event) => {
-                if event.type_tag != TypeTag::Struct(Box::new(Self::struct_tag())) {
-                    bail!("Expected NewEpochEvent")
-                }
-                Self::try_from_bytes(&event.event_data)
-            },
-            ContractEvent::V2(_) => bail!("This is a module event"),
+        if event.is_new_epoch_event() {
+            Self::try_from_bytes(event.event_data())
+        } else {
+            bail!("Expected NewEpochEvent")
         }
     }
 }

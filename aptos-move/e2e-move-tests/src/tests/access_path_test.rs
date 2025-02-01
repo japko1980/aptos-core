@@ -7,7 +7,7 @@ use aptos_types::{
 };
 use move_binary_format::{
     file_format::{
-        AbilitySet, AddressIdentifierIndex, Bytecode::*, CodeUnit, Constant, ConstantPoolIndex,
+        AddressIdentifierIndex, Bytecode::*, CodeUnit, Constant, ConstantPoolIndex,
         FieldDefinition, FunctionDefinition, FunctionHandle, FunctionHandleIndex, IdentifierIndex,
         ModuleHandle, ModuleHandleIndex, Signature, SignatureIndex, SignatureToken,
         StructDefInstantiation, StructDefInstantiationIndex, StructDefinition,
@@ -16,13 +16,13 @@ use move_binary_format::{
     },
     CompiledModule,
 };
-use move_core_types::{identifier::Identifier, vm_status::StatusCode};
+use move_core_types::{ability::AbilitySet, identifier::Identifier, vm_status::StatusCode};
 
 #[test]
 fn access_path_panic() {
     // github.com/aptos-labs/aptos-core/security/advisories/GHSA-rpw2-84hq-48jj
     let mut ty = SignatureToken::Bool;
-    for _ in 0..20 {
+    for _ in 0..18 {
         ty = SignatureToken::StructInstantiation(StructHandleIndex(0), vec![ty]);
     }
 
@@ -90,6 +90,10 @@ fn access_path_panic() {
                 ],
             }),
         }],
+        struct_variant_handles: vec![],
+        struct_variant_instantiations: vec![],
+        variant_field_handles: vec![],
+        variant_field_instantiations: vec![],
     };
 
     let mut module_bytes = vec![];

@@ -6,7 +6,8 @@ use move_bytecode_verifier::{
     limits::LimitsVerifier, verify_module_with_config_for_test, VerifierConfig,
 };
 use move_core_types::{
-    account_address::AccountAddress, identifier::Identifier, vm_status::StatusCode,
+    ability::AbilitySet, account_address::AccountAddress, identifier::Identifier,
+    vm_status::StatusCode,
 };
 
 #[test]
@@ -243,6 +244,10 @@ fn big_vec_unpacks() {
                 code,
             }),
         }],
+        struct_variant_handles: vec![],
+        struct_variant_instantiations: vec![],
+        variant_field_handles: vec![],
+        variant_field_instantiations: vec![],
     };
 
     // save module and verify that it can ser/de

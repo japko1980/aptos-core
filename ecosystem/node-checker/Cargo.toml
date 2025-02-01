@@ -14,7 +14,6 @@ rust-version = { workspace = true }
 
 [dependencies]
 anyhow = { workspace = true }
-aptos-api = { workspace = true }
 aptos-config = { workspace = true }
 aptos-crypto = { workspace = true }
 aptos-logger = { workspace = true }
@@ -22,10 +21,9 @@ aptos-network-checker = { workspace = true }
 aptos-rest-client = { workspace = true }
 aptos-sdk = { workspace = true }
 aptos-transaction-emitter-lib = { workspace = true }
+aptos-transaction-workloads-lib = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true }
-const_format = { workspace = true }
-env_logger = { workspace = true }
 futures = { workspace = true }
 once_cell = { workspace = true }
 poem = { workspace = true }

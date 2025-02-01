@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use aptos_gas_algebra::{
-    DynamicExpression, Fee, FeePerGasUnit, GasExpression, InternalGas, InternalGasUnit, Octa,
+    DynamicExpression, Fee, FeePerGasUnit, Gas, GasExpression, InternalGas, InternalGasUnit,
+    NumBytes, Octa,
 };
 use aptos_gas_meter::GasAlgebra;
 use aptos_gas_schedule::VMGasParameters;
@@ -80,6 +81,10 @@ impl<A: GasAlgebra> GasAlgebra for CalibrationAlgebra<A> {
             .charge_storage_fee(abstract_amount, gas_unit_price)
     }
 
+    fn count_dependency(&mut self, size: NumBytes) -> PartialVMResult<()> {
+        self.base.count_dependency(size)
+    }
+
     fn execution_gas_used(&self) -> InternalGas {
         self.base.execution_gas_used()
     }
@@ -94,5 +99,9 @@ impl<A: GasAlgebra> GasAlgebra for CalibrationAlgebra<A> {
 
     fn storage_fee_used(&self) -> Fee {
         self.base.storage_fee_used()
+    }
+
+    fn inject_balance(&mut self, new_initial_gas: impl Into<Gas>) -> PartialVMResult<()> {
+        self.base.inject_balance(new_initial_gas)
     }
 }

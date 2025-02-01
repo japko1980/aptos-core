@@ -14,17 +14,27 @@ use aptos_crypto::{
     hash::{CryptoHash, SPARSE_MERKLE_PLACEHOLDER_HASH},
     HashValue,
 };
-use aptos_experimental_runtimes::thread_manager::THREAD_MANAGER;
+use aptos_drop_helper::ArcAsyncDrop;
 use aptos_types::proof::{definition::NodeInProof, SparseMerkleLeafNode, SparseMerkleProofExt};
+use aptos_vm::AptosVM;
+use once_cell::sync::Lazy;
 use std::cmp::Ordering;
+
+static POOL: Lazy<rayon::ThreadPool> = Lazy::new(|| {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(AptosVM::get_num_proof_reading_threads())
+        .thread_name(|index| format!("smt_update_{}", index))
+        .build()
+        .unwrap()
+});
 
 type Result<T> = std::result::Result<T, UpdateError>;
 
 type InMemSubTree<V> = super::node::SubTree<V>;
-type InMemInternal<V> = super::node::InternalNode<V>;
+type InMemInternal<V> = InternalNode<V>;
 
 #[derive(Clone)]
-enum InMemSubTreeInfo<V: Send + Sync + 'static> {
+enum InMemSubTreeInfo<V: ArcAsyncDrop> {
     Internal {
         subtree: InMemSubTree<V>,
         node: InMemInternal<V>,
@@ -98,19 +108,19 @@ impl<V: Clone + CryptoHash + Send + Sync + 'static> InMemSubTreeInfo<V> {
 }
 
 #[derive(Clone)]
-enum PersistedSubTreeInfo<'a> {
-    ProofPathInternal { proof: &'a SparseMerkleProofExt },
+enum PersistedSubTreeInfo {
+    ProofPathInternal { proof: SparseMerkleProofExt },
     ProofSibling { hash: HashValue },
     Leaf { leaf: SparseMerkleLeafNode },
 }
 
 #[derive(Clone)]
-enum SubTreeInfo<'a, V: Send + Sync + 'static> {
+enum SubTreeInfo<V: ArcAsyncDrop> {
     InMem(InMemSubTreeInfo<V>),
-    Persisted(PersistedSubTreeInfo<'a>),
+    Persisted(PersistedSubTreeInfo),
 }
 
-impl<'a, V: Clone + CryptoHash + Send + Sync + 'static> SubTreeInfo<'a, V> {
+impl<'a, V: Clone + CryptoHash + Send + Sync + 'static> SubTreeInfo<V> {
     fn new_empty() -> Self {
         Self::InMem(InMemSubTreeInfo::Empty)
     }
@@ -132,8 +142,8 @@ impl<'a, V: Clone + CryptoHash + Send + Sync + 'static> SubTreeInfo<'a, V> {
         }
     }
 
-    fn new_on_proof_path(proof: &'a SparseMerkleProofExt, depth: usize) -> Self {
-        match proof.siblings().len().cmp(&depth) {
+    fn new_on_proof_path(proof: SparseMerkleProofExt, depth: usize) -> Self {
+        match proof.bottom_depth().cmp(&depth) {
             Ordering::Greater => Self::Persisted(PersistedSubTreeInfo::ProofPathInternal { proof }),
             Ordering::Equal => match proof.leaf() {
                 Some(leaf) => Self::new_proof_leaf(leaf),
@@ -149,12 +159,12 @@ impl<'a, V: Clone + CryptoHash + Send + Sync + 'static> SubTreeInfo<'a, V> {
         proof_reader: &'a impl ProofRead,
     ) -> Result<Self> {
         let proof = proof_reader
-            .get_proof(a_descendant_key)
+            .get_proof(a_descendant_key, depth)
             .ok_or(UpdateError::MissingProof)?;
-        if depth > proof.siblings().len() {
+        if depth > proof.bottom_depth() {
             return Err(UpdateError::ShortProof {
                 key: a_descendant_key,
-                num_siblings: proof.siblings().len(),
+                num_siblings: proof.bottom_depth(),
                 depth,
             });
         }
@@ -244,11 +254,10 @@ impl<'a, V: Clone + CryptoHash + Send + Sync + 'static> SubTreeInfo<'a, V> {
                     swap_if(myself, SubTreeInfo::new_empty(), key.bit(depth))
                 },
                 PersistedSubTreeInfo::ProofPathInternal { proof } => {
-                    let siblings = proof.siblings();
-                    assert!(siblings.len() > depth);
                     let sibling_child =
-                        SubTreeInfo::new_proof_sibling(&siblings[siblings.len() - depth - 1]);
-                    let on_path_child = SubTreeInfo::new_on_proof_path(proof, depth + 1);
+                        SubTreeInfo::new_proof_sibling(proof.sibling_at_depth(depth + 1).unwrap());
+                    let on_path_child =
+                        SubTreeInfo::new_on_proof_path(myself.expect_into_proof(), depth + 1);
                     swap_if(on_path_child, sibling_child, a_descendent_key.bit(depth))
                 },
                 PersistedSubTreeInfo::ProofSibling { .. } => unreachable!(),
@@ -272,16 +281,23 @@ impl<'a, V: Clone + CryptoHash + Send + Sync + 'static> SubTreeInfo<'a, V> {
             },
         }
     }
+
+    fn expect_into_proof(self) -> SparseMerkleProofExt {
+        match self {
+            SubTreeInfo::Persisted(PersistedSubTreeInfo::ProofPathInternal { proof }) => proof,
+            _ => unreachable!("Known variant."),
+        }
+    }
 }
 
-pub struct SubTreeUpdater<'a, V: Send + Sync + 'static> {
+pub struct SubTreeUpdater<'a, V: ArcAsyncDrop> {
     depth: usize,
-    info: SubTreeInfo<'a, V>,
+    info: SubTreeInfo<V>,
     updates: &'a [(HashValue, Option<&'a V>)],
     generation: u64,
 }
 
-impl<'a, V: Send + Sync + 'static + Clone + CryptoHash> SubTreeUpdater<'a, V> {
+impl<'a, V: ArcAsyncDrop + Clone + CryptoHash> SubTreeUpdater<'a, V> {
     pub(crate) fn update(
         root: InMemSubTree<V>,
         updates: &'a [(HashValue, Option<&'a V>)],
@@ -313,9 +329,7 @@ impl<'a, V: Send + Sync + 'static + Clone + CryptoHash> SubTreeUpdater<'a, V> {
                     && left.updates.len() >= MIN_PARALLELIZABLE_SIZE
                     && right.updates.len() >= MIN_PARALLELIZABLE_SIZE
                 {
-                    THREAD_MANAGER
-                        .get_exe_cpu_pool()
-                        .join(|| left.run(proof_reader), || right.run(proof_reader))
+                    POOL.join(|| left.run(proof_reader), || right.run(proof_reader))
                 } else {
                     (left.run(proof_reader), right.run(proof_reader))
                 };

@@ -33,7 +33,7 @@ use aptos_storage_service_server::{
 use aptos_storage_service_types::StorageServiceMessage;
 use aptos_time_service::TimeService;
 use aptos_types::waypoint::Waypoint;
-use aptos_vm::AptosVM;
+use aptos_vm::aptos_vm::AptosVMBlockExecutor;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
@@ -45,6 +45,7 @@ pub fn create_event_subscription_service(
 ) -> (
     EventSubscriptionService,
     ReconfigNotificationListener<DbBackedOnChainConfig>,
+    Option<ReconfigNotificationListener<DbBackedOnChainConfig>>,
     Option<ReconfigNotificationListener<DbBackedOnChainConfig>>,
     Option<(
         ReconfigNotificationListener<DbBackedOnChainConfig>,
@@ -64,7 +65,19 @@ pub fn create_event_subscription_service(
         .subscribe_to_reconfigurations()
         .expect("Mempool must subscribe to reconfigurations");
 
-    // Create a reconfiguration subscription for consensus (if this is a validator)
+    // Create a reconfiguration subscription for consensus observer (if enabled)
+    let consensus_observer_reconfig_subscription =
+        if node_config.consensus_observer.observer_enabled {
+            Some(
+                event_subscription_service
+                    .subscribe_to_reconfigurations()
+                    .expect("Consensus observer must subscribe to reconfigurations"),
+            )
+        } else {
+            None
+        };
+
+    // Create a reconfiguration subscription for consensus
     let consensus_reconfig_subscription = if node_config.base.role.is_validator() {
         Some(
             event_subscription_service
@@ -75,6 +88,7 @@ pub fn create_event_subscription_service(
         None
     };
 
+    // Create reconfiguration subscriptions for DKG
     let dkg_subscriptions = if node_config.base.role.is_validator() {
         let reconfig_events = event_subscription_service
             .subscribe_to_reconfigurations()
@@ -87,6 +101,7 @@ pub fn create_event_subscription_service(
         None
     };
 
+    // Create reconfiguration subscriptions for JWK consensus
     let jwk_consensus_subscriptions = if node_config.base.role.is_validator() {
         let reconfig_events = event_subscription_service
             .subscribe_to_reconfigurations()
@@ -102,6 +117,7 @@ pub fn create_event_subscription_service(
     (
         event_subscription_service,
         mempool_reconfig_subscription,
+        consensus_observer_reconfig_subscription,
         consensus_reconfig_subscription,
         dkg_subscriptions,
         jwk_consensus_subscriptions,
@@ -136,7 +152,7 @@ pub fn start_state_sync_and_get_notification_handles(
         setup_data_streaming_service(state_sync_config, aptos_data_client.clone())?;
 
     // Create the chunk executor and persistent storage
-    let chunk_executor = Arc::new(ChunkExecutor::<AptosVM>::new(db_rw.clone()));
+    let chunk_executor = Arc::new(ChunkExecutor::<AptosVMBlockExecutor>::new(db_rw.clone()));
     let metadata_storage = PersistentMetadataStorage::new(&node_config.storage.dir());
 
     // Create notification senders and listeners for mempool, consensus and the storage service

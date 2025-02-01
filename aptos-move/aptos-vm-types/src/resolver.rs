@@ -1,14 +1,11 @@
 // Copyright © Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use aptos_aggregator::{
-    resolver::{TAggregatorV1View, TDelayedFieldView},
-    types::DelayedFieldID,
-};
+use aptos_aggregator::resolver::{TAggregatorV1View, TDelayedFieldView};
 use aptos_types::{
     serde_helper::bcs_utils::size_u32_as_uleb128,
     state_store::{
-        errors::StateviewError,
+        errors::StateViewError,
         state_key::StateKey,
         state_storage_usage::StateStorageUsage,
         state_value::{StateValue, StateValueMetadata},
@@ -19,6 +16,7 @@ use aptos_types::{
 use bytes::Bytes;
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::{language_storage::StructTag, value::MoveTypeLayout, vm_status::StatusCode};
+use move_vm_types::delayed_values::delayed_field_id::DelayedFieldID;
 use std::collections::{BTreeMap, HashMap};
 
 /// Allows to query resources from the state.
@@ -76,7 +74,7 @@ pub trait TResourceGroupView {
 
     /// Some resolvers might not be capable of the optimization, and should return false.
     /// Others might return based on the config or the run parameters.
-    fn is_resource_group_split_in_change_set_capable(&self) -> bool {
+    fn is_resource_groups_split_in_change_set_capable(&self) -> bool {
         false
     }
 
@@ -178,9 +176,14 @@ pub trait TModuleView {
 
 /// Allows to query state information, e.g. its usage.
 pub trait StateStorageView {
+    type Key;
+
     fn id(&self) -> StateViewId;
 
-    fn get_usage(&self) -> Result<StateStorageUsage, StateviewError>;
+    /// Reads the state value from the DB. Used to enforce read-before-write for module writes.
+    fn read_state_value(&self, state_key: &Self::Key) -> Result<(), StateViewError>;
+
+    fn get_usage(&self) -> Result<StateStorageUsage, StateViewError>;
 }
 
 /// A fine-grained view of the state during execution.
@@ -200,33 +203,27 @@ pub trait StateStorageView {
 /// TODO: audit and reconsider the default implementation (e.g. should not
 /// resolve AggregatorV2 via the state-view based default implementation, as it
 /// doesn't provide a value exchange functionality).
-pub trait TExecutorView<K, T, L, I, V>:
+pub trait TExecutorView<K, T, L, V>:
     TResourceView<Key = K, Layout = L>
     + TModuleView<Key = K>
     + TAggregatorV1View<Identifier = K>
-    + TDelayedFieldView<Identifier = I, ResourceKey = K, ResourceGroupTag = T>
-    + StateStorageView
+    + TDelayedFieldView<Identifier = DelayedFieldID, ResourceKey = K, ResourceGroupTag = T>
+    + StateStorageView<Key = K>
 {
 }
 
-impl<A, K, T, L, I, V> TExecutorView<K, T, L, I, V> for A where
+impl<A, K, T, L, V> TExecutorView<K, T, L, V> for A where
     A: TResourceView<Key = K, Layout = L>
         + TModuleView<Key = K>
         + TAggregatorV1View<Identifier = K>
-        + TDelayedFieldView<Identifier = I, ResourceKey = K, ResourceGroupTag = T>
-        + StateStorageView
+        + TDelayedFieldView<Identifier = DelayedFieldID, ResourceKey = K, ResourceGroupTag = T>
+        + StateStorageView<Key = K>
 {
 }
 
-pub trait ExecutorView:
-    TExecutorView<StateKey, StructTag, MoveTypeLayout, DelayedFieldID, WriteOp>
-{
-}
+pub trait ExecutorView: TExecutorView<StateKey, StructTag, MoveTypeLayout, WriteOp> {}
 
-impl<T> ExecutorView for T where
-    T: TExecutorView<StateKey, StructTag, MoveTypeLayout, DelayedFieldID, WriteOp>
-{
-}
+impl<T> ExecutorView for T where T: TExecutorView<StateKey, StructTag, MoveTypeLayout, WriteOp> {}
 
 pub trait ResourceGroupView:
     TResourceGroupView<GroupKey = StateKey, ResourceTag = StructTag, Layout = MoveTypeLayout>
@@ -280,11 +277,18 @@ impl<S> StateStorageView for S
 where
     S: StateView,
 {
+    type Key = StateKey;
+
     fn id(&self) -> StateViewId {
         self.id()
     }
 
-    fn get_usage(&self) -> Result<StateStorageUsage, StateviewError> {
+    fn read_state_value(&self, state_key: &Self::Key) -> Result<(), StateViewError> {
+        self.get_state_value(state_key)?;
+        Ok(())
+    }
+
+    fn get_usage(&self) -> Result<StateStorageUsage, StateViewError> {
         self.get_usage().map_err(Into::into)
     }
 }

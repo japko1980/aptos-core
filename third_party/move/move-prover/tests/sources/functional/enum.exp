@@ -1,0 +1,30 @@
+Move prover returns: exiting with model building errors
+error: unsupported language construct
+  ┌─ tests/sources/functional/enum.move:3:5
+  │
+3 │     enum TestNoField has copy, drop {
+  │     ^^^^ Move 2 language construct is not enabled: enum types
+
+error: unsupported language construct
+   ┌─ tests/sources/functional/enum.move:11:5
+   │
+11 │     enum CommonFields has copy, drop {
+   │     ^^^^ Move 2 language construct is not enabled: enum types
+
+error: unsupported language construct
+   ┌─ tests/sources/functional/enum.move:18:25
+   │
+18 │         invariant (self is CommonFields::Bar) ==> self.z > 10;
+   │                         ^^ Move 2 language construct is not enabled: `is` expression
+
+error: unsupported language construct
+   ┌─ tests/sources/functional/enum.move:47:9
+   │
+47 │         match (&common) {
+   │         ^^^^^ Move 2 language construct is not enabled: match expression
+
+error: unsupported language construct
+   ┌─ tests/sources/functional/enum.move:57:5
+   │
+57 │     enum CommonFieldsVector has drop {
+   │     ^^^^ Move 2 language construct is not enabled: enum types

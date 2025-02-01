@@ -234,7 +234,7 @@ mod testing {
         Ok(())
     }
 
-    fn is_non_empty_vector_u8(vec: &Vec<MoveValue>) -> bool {
+    fn is_non_empty_vector_u8(vec: &[MoveValue]) -> bool {
         if vec.is_empty() {
             false
         } else {
@@ -461,7 +461,10 @@ mod testing {
                 }
             },
             MoveValue::Struct(move_struct) => match move_struct {
-                MoveStruct::WithTypes { type_, mut fields } => {
+                MoveStruct::WithTypes {
+                    _type_: type_,
+                    _fields: mut fields,
+                } => {
                     let type_tag = TypeTag::from(type_.clone());
 
                     // Check if struct is an std::string::String

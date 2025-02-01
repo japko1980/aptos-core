@@ -6,15 +6,14 @@ use crate::{
         execution_wait_phase::ExecutionWaitRequest,
         pipeline_phase::{CountedRequest, StatelessPipeline},
     },
-    state_computer::PipelineExecutionResult,
     state_replication::StateComputer,
 };
-use aptos_consensus_types::executed_block::ExecutedBlock;
+use aptos_consensus_types::pipelined_block::PipelinedBlock;
 use aptos_crypto::HashValue;
 use aptos_executor_types::ExecutorError;
 use aptos_logger::debug;
 use async_trait::async_trait;
-use futures::TryFutureExt;
+use futures::{FutureExt, TryFutureExt};
 use std::{
     fmt::{Debug, Display, Formatter},
     sync::Arc,
@@ -25,9 +24,9 @@ use std::{
 /// the buffer manager and send them to the ExecutionPipeline.
 
 pub struct ExecutionRequest {
-    pub ordered_blocks: Vec<ExecutedBlock>,
-    // Hold a CountedRequest to guarantee the executor doesn't get reset with pending tasks
-    // stuck in the ExecutinoPipeline.
+    pub ordered_blocks: Vec<PipelinedBlock>,
+    // Pass down a CountedRequest to the ExecutionPipeline stages in order to guarantee the executor
+    // doesn't get reset with pending tasks stuck in the pipeline.
     pub lifetime_guard: CountedRequest<()>,
 }
 
@@ -62,49 +61,68 @@ impl StatelessPipeline for ExecutionSchedulePhase {
 
     async fn process(&self, req: ExecutionRequest) -> ExecutionWaitRequest {
         let ExecutionRequest {
-            ordered_blocks,
+            mut ordered_blocks,
             lifetime_guard,
         } = req;
 
-        if ordered_blocks.is_empty() {
-            return ExecutionWaitRequest {
-                block_id: HashValue::zero(),
-                fut: Box::pin(async { Err(aptos_executor_types::ExecutorError::EmptyBlocks) }),
-            };
-        }
+        let (block_id, pipeline_enabled) = match ordered_blocks.last() {
+            Some(block) => (block.id(), block.pipeline_enabled()),
+            None => {
+                return ExecutionWaitRequest {
+                    block_id: HashValue::zero(),
+                    fut: Box::pin(async { Err(aptos_executor_types::ExecutorError::EmptyBlocks) }),
+                }
+            },
+        };
 
-        let block_id = ordered_blocks.last().unwrap().id();
-
-        // Call schedule_compute() for each block here (not in the fut being returned) to
-        // make sure they are scheduled in order.
-        let mut futs = vec![];
-        for b in &ordered_blocks {
-            let fut = self
-                .execution_proxy
-                .schedule_compute(b.block(), b.parent_id(), b.randomness().cloned())
-                .await;
-            futs.push(fut)
-        }
-
-        // In the future being returned, wait for the compute results in order.
-        // n.b. Must `spawn()` here to make sure lifetime_guard will be released even if
-        //      ExecutionWait phase is never kicked off.
-        let fut = tokio::task::spawn(async move {
-            let mut results = vec![];
-            for (block, fut) in itertools::zip_eq(ordered_blocks, futs) {
-                debug!("try to receive compute result for block {}", block.id());
-                let PipelineExecutionResult { input_txns, result } = fut.await?;
-                results.push(block.replace_result(input_txns, result));
+        let fut = if pipeline_enabled {
+            for b in &ordered_blocks {
+                if let Some(tx) = b.pipeline_tx().lock().as_mut() {
+                    tx.rand_tx.take().map(|tx| tx.send(b.randomness().cloned()));
+                    tx.order_proof_tx.take().map(|tx| tx.send(()));
+                }
             }
-            drop(lifetime_guard);
-            Ok(results)
-        })
-        .map_err(ExecutorError::internal_err)
-        .and_then(|res| async { res });
 
-        ExecutionWaitRequest {
-            block_id,
-            fut: Box::pin(fut),
-        }
+            async move {
+                for b in ordered_blocks.iter_mut() {
+                    let (compute_result, execution_time) = b.wait_for_compute_result().await?;
+                    b.set_compute_result(compute_result, execution_time);
+                }
+                Ok(ordered_blocks)
+            }
+            .boxed()
+        } else {
+            // Call schedule_compute() for each block here (not in the fut being returned) to
+            // make sure they are scheduled in order.
+            let mut futs = vec![];
+            for b in &ordered_blocks {
+                let fut = self
+                    .execution_proxy
+                    .schedule_compute(
+                        b.block(),
+                        b.parent_id(),
+                        b.randomness().cloned(),
+                        b.qc(),
+                        lifetime_guard.spawn(()),
+                    )
+                    .await;
+                futs.push(fut)
+            }
+
+            // In the future being returned, wait for the compute results in order.
+            tokio::task::spawn(async move {
+                let mut results = vec![];
+                for (block, fut) in itertools::zip_eq(ordered_blocks, futs) {
+                    debug!("try to receive compute result for block {}", block.id());
+                    results.push(block.set_execution_result(fut.await?));
+                }
+                Ok(results)
+            })
+            .map_err(ExecutorError::internal_err)
+            .and_then(|res| async { res })
+            .boxed()
+        };
+
+        ExecutionWaitRequest { block_id, fut }
     }
 }

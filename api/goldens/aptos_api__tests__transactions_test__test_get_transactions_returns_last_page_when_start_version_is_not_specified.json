@@ -58,6 +58,24 @@
         "address": "0x1",
         "state_key_hash": "",
         "data": {
+          "type": "0x1::block::CommitHistory",
+          "data": {
+            "max_capacity": 2000,
+            "next_idx": 14,
+            "table": {
+              "inner": {
+                "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97"
+              },
+              "length": "14"
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
           "type": "0x1::stake::ValidatorPerformance",
           "data": {
             "validators": [
@@ -80,6 +98,31 @@
           }
         },
         "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
+          "type": "0x1::randomness::PerBlockRandomness",
+          "data": {
+            "epoch": "1",
+            "round": "1",
+            "seed": {
+              "vec": []
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "state_key_hash": "",
+        "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97",
+        "key": "0x0d000000",
+        "value": "0x8c9a041f736278db6559cb7f1de04381d82258dc80fa9e128d9e44bc47487682010000000000000001000000000000000d00000000000000010066b22b7465af92a9dc8d07d2878716d9dffbbb280830a7d8cf80334b5da812ef00a02e630000000000",
+        "data": {
+          "data": null
+        },
+        "type": "write_table_item"
       }
     ],
     "id": "0x8c9a041f736278db6559cb7f1de04381d82258dc80fa9e128d9e44bc47487682",
@@ -119,7 +162,7 @@
     "state_change_hash": "",
     "event_root_hash": "",
     "state_checkpoint_hash": null,
-    "gas_used": "4",
+    "gas_used": "9",
     "success": true,
     "vm_status": "Executed successfully",
     "accumulator_root_hash": "",
@@ -132,7 +175,7 @@
           "data": {
             "authentication_key": "0xcef8ffd1ab9017e96132df8a56b22de39a8155e1c3fc32affbbf93eb624b532a",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0xa550c18",
@@ -205,7 +248,7 @@
           "data": {
             "authentication_key": "0x48a951fe0ed12b29517867e00a3a09da55fcf859497b3f04bbed911cb75669c9",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0x48a951fe0ed12b29517867e00a3a09da55fcf859497b3f04bbed911cb75669c9",
@@ -261,11 +304,12 @@
       {
         "guid": {
           "creation_number": "0",
-          "account_address": "0x48a951fe0ed12b29517867e00a3a09da55fcf859497b3f04bbed911cb75669c9"
+          "account_address": "0x0"
         },
         "sequence_number": "0",
-        "type": "0x1::account::CoinRegisterEvent",
+        "type": "0x1::account::CoinRegister",
         "data": {
+          "account": "0x48a951fe0ed12b29517867e00a3a09da55fcf859497b3f04bbed911cb75669c9",
           "type_info": {
             "account_address": "0x1",
             "module_name": "0x6170746f735f636f696e",
@@ -281,11 +325,11 @@
         "sequence_number": "0",
         "type": "0x1::transaction_fee::FeeStatement",
         "data": {
-          "execution_gas_units": "4",
-          "io_gas_units": "1",
+          "execution_gas_units": "5",
+          "io_gas_units": "4",
           "storage_fee_octas": "0",
           "storage_fee_refund_octas": "0",
-          "total_charge_gas_units": "4"
+          "total_charge_gas_units": "9"
         }
       }
     ],
@@ -351,6 +395,24 @@
         "address": "0x1",
         "state_key_hash": "",
         "data": {
+          "type": "0x1::block::CommitHistory",
+          "data": {
+            "max_capacity": 2000,
+            "next_idx": 15,
+            "table": {
+              "inner": {
+                "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97"
+              },
+              "length": "15"
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
           "type": "0x1::stake::ValidatorPerformance",
           "data": {
             "validators": [
@@ -373,6 +435,31 @@
           }
         },
         "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
+          "type": "0x1::randomness::PerBlockRandomness",
+          "data": {
+            "epoch": "1",
+            "round": "1",
+            "seed": {
+              "vec": []
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "state_key_hash": "",
+        "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97",
+        "key": "0x0e000000",
+        "value": "0x9ebb53fc221a6fc07f89f8048c6071e6460792b92ffe078247a77e73abc5297c010000000000000001000000000000000e00000000000000010066b22b7465af92a9dc8d07d2878716d9dffbbb280830a7d8cf80334b5da812ef00c0cf6a0000000000",
+        "data": {
+          "data": null
+        },
+        "type": "write_table_item"
       }
     ],
     "id": "0x9ebb53fc221a6fc07f89f8048c6071e6460792b92ffe078247a77e73abc5297c",
@@ -412,7 +499,7 @@
     "state_change_hash": "",
     "event_root_hash": "",
     "state_checkpoint_hash": null,
-    "gas_used": "4",
+    "gas_used": "9",
     "success": true,
     "vm_status": "Executed successfully",
     "accumulator_root_hash": "",
@@ -425,7 +512,7 @@
           "data": {
             "authentication_key": "0xcef8ffd1ab9017e96132df8a56b22de39a8155e1c3fc32affbbf93eb624b532a",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0xa550c18",
@@ -498,7 +585,7 @@
           "data": {
             "authentication_key": "0x095f70f0272707f73ce63f9b09497324a7b2c9118d5d5fb22cb373efd916a681",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0x95f70f0272707f73ce63f9b09497324a7b2c9118d5d5fb22cb373efd916a681",
@@ -554,11 +641,12 @@
       {
         "guid": {
           "creation_number": "0",
-          "account_address": "0x95f70f0272707f73ce63f9b09497324a7b2c9118d5d5fb22cb373efd916a681"
+          "account_address": "0x0"
         },
         "sequence_number": "0",
-        "type": "0x1::account::CoinRegisterEvent",
+        "type": "0x1::account::CoinRegister",
         "data": {
+          "account": "0x95f70f0272707f73ce63f9b09497324a7b2c9118d5d5fb22cb373efd916a681",
           "type_info": {
             "account_address": "0x1",
             "module_name": "0x6170746f735f636f696e",
@@ -574,11 +662,11 @@
         "sequence_number": "0",
         "type": "0x1::transaction_fee::FeeStatement",
         "data": {
-          "execution_gas_units": "4",
-          "io_gas_units": "1",
+          "execution_gas_units": "5",
+          "io_gas_units": "4",
           "storage_fee_octas": "0",
           "storage_fee_refund_octas": "0",
-          "total_charge_gas_units": "4"
+          "total_charge_gas_units": "9"
         }
       }
     ],
@@ -644,6 +732,24 @@
         "address": "0x1",
         "state_key_hash": "",
         "data": {
+          "type": "0x1::block::CommitHistory",
+          "data": {
+            "max_capacity": 2000,
+            "next_idx": 16,
+            "table": {
+              "inner": {
+                "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97"
+              },
+              "length": "16"
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
           "type": "0x1::stake::ValidatorPerformance",
           "data": {
             "validators": [
@@ -666,6 +772,31 @@
           }
         },
         "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
+          "type": "0x1::randomness::PerBlockRandomness",
+          "data": {
+            "epoch": "1",
+            "round": "1",
+            "seed": {
+              "vec": []
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "state_key_hash": "",
+        "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97",
+        "key": "0x0f000000",
+        "value": "0x3ddcb6c382270184cb1c0e7044b272ba0b2382d21b06966dd5ff00f5fa36dbef010000000000000001000000000000000f00000000000000010066b22b7465af92a9dc8d07d2878716d9dffbbb280830a7d8cf80334b5da812ef00e070720000000000",
+        "data": {
+          "data": null
+        },
+        "type": "write_table_item"
       }
     ],
     "id": "0x3ddcb6c382270184cb1c0e7044b272ba0b2382d21b06966dd5ff00f5fa36dbef",
@@ -705,7 +836,7 @@
     "state_change_hash": "",
     "event_root_hash": "",
     "state_checkpoint_hash": null,
-    "gas_used": "4",
+    "gas_used": "9",
     "success": true,
     "vm_status": "Executed successfully",
     "accumulator_root_hash": "",
@@ -718,7 +849,7 @@
           "data": {
             "authentication_key": "0xcef8ffd1ab9017e96132df8a56b22de39a8155e1c3fc32affbbf93eb624b532a",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0xa550c18",
@@ -791,7 +922,7 @@
           "data": {
             "authentication_key": "0x4c989e245d6ce3f3735edb8ef9f84c34d5e6f0991bea502b05cd1ea74d327a22",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0x4c989e245d6ce3f3735edb8ef9f84c34d5e6f0991bea502b05cd1ea74d327a22",
@@ -847,11 +978,12 @@
       {
         "guid": {
           "creation_number": "0",
-          "account_address": "0x4c989e245d6ce3f3735edb8ef9f84c34d5e6f0991bea502b05cd1ea74d327a22"
+          "account_address": "0x0"
         },
         "sequence_number": "0",
-        "type": "0x1::account::CoinRegisterEvent",
+        "type": "0x1::account::CoinRegister",
         "data": {
+          "account": "0x4c989e245d6ce3f3735edb8ef9f84c34d5e6f0991bea502b05cd1ea74d327a22",
           "type_info": {
             "account_address": "0x1",
             "module_name": "0x6170746f735f636f696e",
@@ -867,11 +999,11 @@
         "sequence_number": "0",
         "type": "0x1::transaction_fee::FeeStatement",
         "data": {
-          "execution_gas_units": "4",
-          "io_gas_units": "1",
+          "execution_gas_units": "5",
+          "io_gas_units": "4",
           "storage_fee_octas": "0",
           "storage_fee_refund_octas": "0",
-          "total_charge_gas_units": "4"
+          "total_charge_gas_units": "9"
         }
       }
     ],
@@ -937,6 +1069,24 @@
         "address": "0x1",
         "state_key_hash": "",
         "data": {
+          "type": "0x1::block::CommitHistory",
+          "data": {
+            "max_capacity": 2000,
+            "next_idx": 17,
+            "table": {
+              "inner": {
+                "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97"
+              },
+              "length": "17"
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
           "type": "0x1::stake::ValidatorPerformance",
           "data": {
             "validators": [
@@ -959,6 +1109,31 @@
           }
         },
         "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
+          "type": "0x1::randomness::PerBlockRandomness",
+          "data": {
+            "epoch": "1",
+            "round": "1",
+            "seed": {
+              "vec": []
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "state_key_hash": "",
+        "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97",
+        "key": "0x10000000",
+        "value": "0x5d05da6e72c49bf2791775d0465453e709d3d46d8aae837610781514ae1b0ee6010000000000000001000000000000001000000000000000010066b22b7465af92a9dc8d07d2878716d9dffbbb280830a7d8cf80334b5da812ef0000127a0000000000",
+        "data": {
+          "data": null
+        },
+        "type": "write_table_item"
       }
     ],
     "id": "0x5d05da6e72c49bf2791775d0465453e709d3d46d8aae837610781514ae1b0ee6",
@@ -998,7 +1173,7 @@
     "state_change_hash": "",
     "event_root_hash": "",
     "state_checkpoint_hash": null,
-    "gas_used": "4",
+    "gas_used": "9",
     "success": true,
     "vm_status": "Executed successfully",
     "accumulator_root_hash": "",
@@ -1011,7 +1186,7 @@
           "data": {
             "authentication_key": "0xcef8ffd1ab9017e96132df8a56b22de39a8155e1c3fc32affbbf93eb624b532a",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0xa550c18",
@@ -1084,7 +1259,7 @@
           "data": {
             "authentication_key": "0x46925daed0a8767bb9437ccccfdf31a1d349a05659710ca0ebe6205d0e5d737e",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0x46925daed0a8767bb9437ccccfdf31a1d349a05659710ca0ebe6205d0e5d737e",
@@ -1140,11 +1315,12 @@
       {
         "guid": {
           "creation_number": "0",
-          "account_address": "0x46925daed0a8767bb9437ccccfdf31a1d349a05659710ca0ebe6205d0e5d737e"
+          "account_address": "0x0"
         },
         "sequence_number": "0",
-        "type": "0x1::account::CoinRegisterEvent",
+        "type": "0x1::account::CoinRegister",
         "data": {
+          "account": "0x46925daed0a8767bb9437ccccfdf31a1d349a05659710ca0ebe6205d0e5d737e",
           "type_info": {
             "account_address": "0x1",
             "module_name": "0x6170746f735f636f696e",
@@ -1160,11 +1336,11 @@
         "sequence_number": "0",
         "type": "0x1::transaction_fee::FeeStatement",
         "data": {
-          "execution_gas_units": "4",
-          "io_gas_units": "1",
+          "execution_gas_units": "5",
+          "io_gas_units": "4",
           "storage_fee_octas": "0",
           "storage_fee_refund_octas": "0",
-          "total_charge_gas_units": "4"
+          "total_charge_gas_units": "9"
         }
       }
     ],
@@ -1230,6 +1406,24 @@
         "address": "0x1",
         "state_key_hash": "",
         "data": {
+          "type": "0x1::block::CommitHistory",
+          "data": {
+            "max_capacity": 2000,
+            "next_idx": 18,
+            "table": {
+              "inner": {
+                "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97"
+              },
+              "length": "18"
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
           "type": "0x1::stake::ValidatorPerformance",
           "data": {
             "validators": [
@@ -1252,6 +1446,31 @@
           }
         },
         "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
+          "type": "0x1::randomness::PerBlockRandomness",
+          "data": {
+            "epoch": "1",
+            "round": "1",
+            "seed": {
+              "vec": []
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "state_key_hash": "",
+        "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97",
+        "key": "0x11000000",
+        "value": "0xd2d00107d2f0b1323b9e27213f8b003f78a5cdd081007bd11f09b7e6fa232b0a010000000000000001000000000000001100000000000000010066b22b7465af92a9dc8d07d2878716d9dffbbb280830a7d8cf80334b5da812ef0020b3810000000000",
+        "data": {
+          "data": null
+        },
+        "type": "write_table_item"
       }
     ],
     "id": "0xd2d00107d2f0b1323b9e27213f8b003f78a5cdd081007bd11f09b7e6fa232b0a",
@@ -1291,7 +1510,7 @@
     "state_change_hash": "",
     "event_root_hash": "",
     "state_checkpoint_hash": null,
-    "gas_used": "4",
+    "gas_used": "9",
     "success": true,
     "vm_status": "Executed successfully",
     "accumulator_root_hash": "",
@@ -1304,7 +1523,7 @@
           "data": {
             "authentication_key": "0xcef8ffd1ab9017e96132df8a56b22de39a8155e1c3fc32affbbf93eb624b532a",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0xa550c18",
@@ -1377,7 +1596,7 @@
           "data": {
             "authentication_key": "0xfcad780f86d4ee8a3a200bb9289f77eb824bf1d6c155c8d007fc128bfbc33e06",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0xfcad780f86d4ee8a3a200bb9289f77eb824bf1d6c155c8d007fc128bfbc33e06",
@@ -1433,11 +1652,12 @@
       {
         "guid": {
           "creation_number": "0",
-          "account_address": "0xfcad780f86d4ee8a3a200bb9289f77eb824bf1d6c155c8d007fc128bfbc33e06"
+          "account_address": "0x0"
         },
         "sequence_number": "0",
-        "type": "0x1::account::CoinRegisterEvent",
+        "type": "0x1::account::CoinRegister",
         "data": {
+          "account": "0xfcad780f86d4ee8a3a200bb9289f77eb824bf1d6c155c8d007fc128bfbc33e06",
           "type_info": {
             "account_address": "0x1",
             "module_name": "0x6170746f735f636f696e",
@@ -1453,11 +1673,11 @@
         "sequence_number": "0",
         "type": "0x1::transaction_fee::FeeStatement",
         "data": {
-          "execution_gas_units": "4",
-          "io_gas_units": "1",
+          "execution_gas_units": "5",
+          "io_gas_units": "4",
           "storage_fee_octas": "0",
           "storage_fee_refund_octas": "0",
-          "total_charge_gas_units": "4"
+          "total_charge_gas_units": "9"
         }
       }
     ],
@@ -1523,6 +1743,24 @@
         "address": "0x1",
         "state_key_hash": "",
         "data": {
+          "type": "0x1::block::CommitHistory",
+          "data": {
+            "max_capacity": 2000,
+            "next_idx": 19,
+            "table": {
+              "inner": {
+                "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97"
+              },
+              "length": "19"
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
           "type": "0x1::stake::ValidatorPerformance",
           "data": {
             "validators": [
@@ -1545,6 +1783,31 @@
           }
         },
         "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
+          "type": "0x1::randomness::PerBlockRandomness",
+          "data": {
+            "epoch": "1",
+            "round": "1",
+            "seed": {
+              "vec": []
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "state_key_hash": "",
+        "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97",
+        "key": "0x12000000",
+        "value": "0xa8d6521a26daafda96dacf7f582cb1dbdc84c06e7953e5f1c769ef8a93dcbeb3010000000000000001000000000000001200000000000000010066b22b7465af92a9dc8d07d2878716d9dffbbb280830a7d8cf80334b5da812ef004054890000000000",
+        "data": {
+          "data": null
+        },
+        "type": "write_table_item"
       }
     ],
     "id": "0xa8d6521a26daafda96dacf7f582cb1dbdc84c06e7953e5f1c769ef8a93dcbeb3",
@@ -1584,7 +1847,7 @@
     "state_change_hash": "",
     "event_root_hash": "",
     "state_checkpoint_hash": null,
-    "gas_used": "4",
+    "gas_used": "9",
     "success": true,
     "vm_status": "Executed successfully",
     "accumulator_root_hash": "",
@@ -1597,7 +1860,7 @@
           "data": {
             "authentication_key": "0xcef8ffd1ab9017e96132df8a56b22de39a8155e1c3fc32affbbf93eb624b532a",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0xa550c18",
@@ -1670,7 +1933,7 @@
           "data": {
             "authentication_key": "0x099acce340661e0c847ca95ff58ced5f474bc30ca7972106e6a90055c1bdeb26",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0x99acce340661e0c847ca95ff58ced5f474bc30ca7972106e6a90055c1bdeb26",
@@ -1726,11 +1989,12 @@
       {
         "guid": {
           "creation_number": "0",
-          "account_address": "0x99acce340661e0c847ca95ff58ced5f474bc30ca7972106e6a90055c1bdeb26"
+          "account_address": "0x0"
         },
         "sequence_number": "0",
-        "type": "0x1::account::CoinRegisterEvent",
+        "type": "0x1::account::CoinRegister",
         "data": {
+          "account": "0x99acce340661e0c847ca95ff58ced5f474bc30ca7972106e6a90055c1bdeb26",
           "type_info": {
             "account_address": "0x1",
             "module_name": "0x6170746f735f636f696e",
@@ -1746,11 +2010,11 @@
         "sequence_number": "0",
         "type": "0x1::transaction_fee::FeeStatement",
         "data": {
-          "execution_gas_units": "4",
-          "io_gas_units": "1",
+          "execution_gas_units": "5",
+          "io_gas_units": "4",
           "storage_fee_octas": "0",
           "storage_fee_refund_octas": "0",
-          "total_charge_gas_units": "4"
+          "total_charge_gas_units": "9"
         }
       }
     ],
@@ -1816,6 +2080,24 @@
         "address": "0x1",
         "state_key_hash": "",
         "data": {
+          "type": "0x1::block::CommitHistory",
+          "data": {
+            "max_capacity": 2000,
+            "next_idx": 20,
+            "table": {
+              "inner": {
+                "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97"
+              },
+              "length": "20"
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
           "type": "0x1::stake::ValidatorPerformance",
           "data": {
             "validators": [
@@ -1838,6 +2120,31 @@
           }
         },
         "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
+          "type": "0x1::randomness::PerBlockRandomness",
+          "data": {
+            "epoch": "1",
+            "round": "1",
+            "seed": {
+              "vec": []
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "state_key_hash": "",
+        "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97",
+        "key": "0x13000000",
+        "value": "0x142c31e08bfca525c34fa8a59ebcb300e72586225d613eb0af32ce80b0e9529f010000000000000001000000000000001300000000000000010066b22b7465af92a9dc8d07d2878716d9dffbbb280830a7d8cf80334b5da812ef0060f5900000000000",
+        "data": {
+          "data": null
+        },
+        "type": "write_table_item"
       }
     ],
     "id": "0x142c31e08bfca525c34fa8a59ebcb300e72586225d613eb0af32ce80b0e9529f",
@@ -1877,7 +2184,7 @@
     "state_change_hash": "",
     "event_root_hash": "",
     "state_checkpoint_hash": null,
-    "gas_used": "4",
+    "gas_used": "9",
     "success": true,
     "vm_status": "Executed successfully",
     "accumulator_root_hash": "",
@@ -1890,7 +2197,7 @@
           "data": {
             "authentication_key": "0xcef8ffd1ab9017e96132df8a56b22de39a8155e1c3fc32affbbf93eb624b532a",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0xa550c18",
@@ -1963,7 +2270,7 @@
           "data": {
             "authentication_key": "0xe9be740413c5f028e58ca77e0540355874c210b49bcd8a75db8880a7ac3273cd",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0xe9be740413c5f028e58ca77e0540355874c210b49bcd8a75db8880a7ac3273cd",
@@ -2019,11 +2326,12 @@
       {
         "guid": {
           "creation_number": "0",
-          "account_address": "0xe9be740413c5f028e58ca77e0540355874c210b49bcd8a75db8880a7ac3273cd"
+          "account_address": "0x0"
         },
         "sequence_number": "0",
-        "type": "0x1::account::CoinRegisterEvent",
+        "type": "0x1::account::CoinRegister",
         "data": {
+          "account": "0xe9be740413c5f028e58ca77e0540355874c210b49bcd8a75db8880a7ac3273cd",
           "type_info": {
             "account_address": "0x1",
             "module_name": "0x6170746f735f636f696e",
@@ -2039,11 +2347,11 @@
         "sequence_number": "0",
         "type": "0x1::transaction_fee::FeeStatement",
         "data": {
-          "execution_gas_units": "4",
-          "io_gas_units": "1",
+          "execution_gas_units": "5",
+          "io_gas_units": "4",
           "storage_fee_octas": "0",
           "storage_fee_refund_octas": "0",
-          "total_charge_gas_units": "4"
+          "total_charge_gas_units": "9"
         }
       }
     ],
@@ -2109,6 +2417,24 @@
         "address": "0x1",
         "state_key_hash": "",
         "data": {
+          "type": "0x1::block::CommitHistory",
+          "data": {
+            "max_capacity": 2000,
+            "next_idx": 21,
+            "table": {
+              "inner": {
+                "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97"
+              },
+              "length": "21"
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
           "type": "0x1::stake::ValidatorPerformance",
           "data": {
             "validators": [
@@ -2131,6 +2457,31 @@
           }
         },
         "type": "write_resource"
+      },
+      {
+        "address": "0x1",
+        "state_key_hash": "",
+        "data": {
+          "type": "0x1::randomness::PerBlockRandomness",
+          "data": {
+            "epoch": "1",
+            "round": "1",
+            "seed": {
+              "vec": []
+            }
+          }
+        },
+        "type": "write_resource"
+      },
+      {
+        "state_key_hash": "",
+        "handle": "0x38ff67f17cf7998cd41ed5267b52cff7af37d06a22e8b390ce44b69680fc0e97",
+        "key": "0x14000000",
+        "value": "0xf6ce4988f3b078f37f863539358646c46f14aa24caa8745bf26f63f76d85fdbd010000000000000001000000000000001400000000000000010066b22b7465af92a9dc8d07d2878716d9dffbbb280830a7d8cf80334b5da812ef008096980000000000",
+        "data": {
+          "data": null
+        },
+        "type": "write_table_item"
       }
     ],
     "id": "0xf6ce4988f3b078f37f863539358646c46f14aa24caa8745bf26f63f76d85fdbd",
@@ -2170,7 +2521,7 @@
     "state_change_hash": "",
     "event_root_hash": "",
     "state_checkpoint_hash": null,
-    "gas_used": "4",
+    "gas_used": "9",
     "success": true,
     "vm_status": "Executed successfully",
     "accumulator_root_hash": "",
@@ -2183,7 +2534,7 @@
           "data": {
             "authentication_key": "0xcef8ffd1ab9017e96132df8a56b22de39a8155e1c3fc32affbbf93eb624b532a",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0xa550c18",
@@ -2256,7 +2607,7 @@
           "data": {
             "authentication_key": "0x626d590a97d6b59c93711a3cdc7aea92eca7fc5c3615084f43394791f1d6d300",
             "coin_register_events": {
-              "counter": "1",
+              "counter": "0",
               "guid": {
                 "id": {
                   "addr": "0x626d590a97d6b59c93711a3cdc7aea92eca7fc5c3615084f43394791f1d6d300",
@@ -2312,11 +2663,12 @@
       {
         "guid": {
           "creation_number": "0",
-          "account_address": "0x626d590a97d6b59c93711a3cdc7aea92eca7fc5c3615084f43394791f1d6d300"
+          "account_address": "0x0"
         },
         "sequence_number": "0",
-        "type": "0x1::account::CoinRegisterEvent",
+        "type": "0x1::account::CoinRegister",
         "data": {
+          "account": "0x626d590a97d6b59c93711a3cdc7aea92eca7fc5c3615084f43394791f1d6d300",
           "type_info": {
             "account_address": "0x1",
             "module_name": "0x6170746f735f636f696e",
@@ -2332,11 +2684,11 @@
         "sequence_number": "0",
         "type": "0x1::transaction_fee::FeeStatement",
         "data": {
-          "execution_gas_units": "4",
-          "io_gas_units": "1",
+          "execution_gas_units": "5",
+          "io_gas_units": "4",
           "storage_fee_octas": "0",
           "storage_fee_refund_octas": "0",
-          "total_charge_gas_units": "4"
+          "total_charge_gas_units": "9"
         }
       }
     ],

@@ -26,6 +26,12 @@ pub const RECEIVED_LABEL: &str = "received";
 pub const SENT_LABEL: &str = "sent";
 pub const SUCCEEDED_LABEL: &str = "succeeded";
 pub const FAILED_LABEL: &str = "failed";
+pub const UNKNOWN_LABEL: &str = "unknown";
+
+// Connection operation labels
+pub const DIAL_LABEL: &str = "dial";
+pub const DIAL_PEER_LABEL: &str = "dial_peer";
+pub const DISCONNECT_LABEL: &str = "disconnect";
 
 // Direction labels
 pub const INBOUND_LABEL: &str = "inbound";
@@ -136,6 +142,27 @@ pub fn pending_connection_upgrades(
         network_context.peer_id().short_str().as_str(),
         direction.as_str(),
     ])
+}
+
+/// A simple counter for tracking network connection operations
+pub static APTOS_NETWORK_CONNECTION_OPERATIONS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "aptos_network_connection_operations",
+        "Counter for tracking connection operations",
+        &["network_id", "operation", "label"]
+    )
+    .unwrap()
+});
+
+/// Updates the network connection operation metrics with the given operation and label
+pub fn update_network_connection_operation_metrics(
+    network_context: &NetworkContext,
+    operation: String,
+    label: String,
+) {
+    APTOS_NETWORK_CONNECTION_OPERATIONS
+        .with_label_values(&[network_context.network_id().as_str(), &operation, &label])
+        .inc();
 }
 
 pub static APTOS_NETWORK_CONNECTION_UPGRADE_TIME: Lazy<HistogramVec> = Lazy::new(|| {
@@ -415,10 +442,11 @@ pub static PENDING_PEER_MANAGER_DIAL_REQUESTS: Lazy<IntGauge> = Lazy::new(|| {
 });
 
 /// Counter of messages pending in queue to be sent out on the wire.
-pub static PENDING_WIRE_MESSAGES: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!(
+pub static PENDING_WIRE_MESSAGES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
         "aptos_network_pending_wire_messages",
-        "Number of pending wire messages"
+        "Number of pending wire messages",
+        &["state"],
     )
     .unwrap()
 });
@@ -627,4 +655,29 @@ fn observe_ping_time(network_context: &NetworkContext, ping_latency_secs: f64, l
     NETWORK_PEER_PING_TIMES
         .with_label_values(&[network_context.network_id().as_str(), label])
         .observe(ping_latency_secs);
+}
+
+pub static OP_MEASURE: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "aptos_network_measure",
+        "Measures the time and count of an operation",
+        &["op"]
+    )
+    .unwrap()
+});
+
+pub static INBOUND_QUEUE_DELAY: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "aptos_network_inbound_queue_time",
+        "Time a message sits in queue between peer socket and app code",
+        &["protocol_id"],
+        exponential_buckets(/*start=*/ 1e-6, /*factor=*/ 2.0, /*count=*/ 20).unwrap(),
+    )
+    .unwrap()
+});
+
+pub fn inbound_queue_delay_observe(protocol_id: ProtocolId, seconds: f64) {
+    INBOUND_QUEUE_DELAY
+        .with_label_values(&[protocol_id.as_str()])
+        .observe(seconds)
 }

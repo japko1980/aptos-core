@@ -17,7 +17,7 @@ use proptest::prelude::*;
 use serde::Deserialize;
 use test_case::test_case;
 
-// This mode describes whether to enable or disable RESOURCE_GROUPS_CHARGE_AS_SIZE_SUM flag
+// This mode describes whether to enable or disable RESOURCE_GROUPS_SPLIT_IN_VM_CHANGE_SET flag
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ResourceGroupMode {
     EnabledOnly,
@@ -34,7 +34,7 @@ const ERESOURCE_DOESNT_EXIST: u64 = 19;
 // Could cleanup later on.
 fn setup(
     executor_mode: ExecutorMode,
-    // This mode describes whether to enable or disable RESOURCE_GROUPS_CHARGE_AS_SIZE_SUM flag
+    // This mode describes whether to enable or disable RESOURCE_GROUPS_SPLIT_IN_VM_CHANGE_SET flag
     resource_group_mode: ResourceGroupMode,
     txns: usize,
 ) -> ResourceGroupsTestHarness {
@@ -165,12 +165,12 @@ fn test_resource_groups(resource_group_charge_as_sum_enabled: bool) {
     let mut h = MoveHarness::new();
     if resource_group_charge_as_sum_enabled {
         h.enable_features(
-            vec![FeatureFlag::RESOURCE_GROUPS_CHARGE_AS_SIZE_SUM],
+            vec![FeatureFlag::RESOURCE_GROUPS_SPLIT_IN_VM_CHANGE_SET],
             vec![],
         );
     } else {
         h.enable_features(vec![], vec![
-            FeatureFlag::RESOURCE_GROUPS_CHARGE_AS_SIZE_SUM,
+            FeatureFlag::RESOURCE_GROUPS_SPLIT_IN_VM_CHANGE_SET,
         ]);
     }
 
@@ -207,19 +207,19 @@ fn test_resource_groups(resource_group_charge_as_sum_enabled: bool) {
         address: primary_addr,
         module: Identifier::new("primary").unwrap(),
         name: Identifier::new("ResourceGroupContainer").unwrap(),
-        type_params: vec![],
+        type_args: vec![],
     };
     let primary_tag = StructTag {
         address: primary_addr,
         module: Identifier::new("primary").unwrap(),
         name: Identifier::new("Primary").unwrap(),
-        type_params: vec![],
+        type_args: vec![],
     };
     let secondary_tag = StructTag {
         address: secondary_addr,
         module: Identifier::new("secondary").unwrap(),
         name: Identifier::new("Secondary").unwrap(),
-        type_params: vec![],
+        type_args: vec![],
     };
 
     // Assert that no data exists yet

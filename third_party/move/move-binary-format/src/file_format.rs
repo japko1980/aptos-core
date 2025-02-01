@@ -31,23 +31,25 @@
 
 use crate::{
     access::{ModuleAccess, ScriptAccess},
-    errors::{PartialVMError, PartialVMResult},
     file_format_common,
+    file_format_common::VERSION_DEFAULT,
     internals::ModuleIndex,
-    IndexKind, SignatureTokenKind,
+    IndexKind,
 };
+use move_bytecode_spec::bytecode_spec;
 use move_core_types::{
+    ability::AbilitySet,
     account_address::AccountAddress,
+    function::ClosureMask,
     identifier::{IdentStr, Identifier},
     language_storage::ModuleId,
     metadata::Metadata,
-    vm_status::StatusCode,
 };
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest::{collection::vec, prelude::*, strategy::BoxedStrategy};
 use ref_cast::RefCast;
 use serde::{Deserialize, Serialize};
-use std::{fmt, ops::BitOr};
+use std::fmt;
 use variant_count::VariantCount;
 
 /// Generic index into one of the tables in the binary format.
@@ -62,7 +64,7 @@ macro_rules! define_index {
         #[derive(Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
         #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
         #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-        #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+        #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary))]
         #[doc=$comment]
         pub struct $name(pub TableIndex);
 
@@ -162,12 +164,36 @@ define_index! {
     doc: "Index into the `FunctionDefinition` table.",
 }
 
+// Since bytecode version 7
+define_index! {
+    name: StructVariantHandleIndex,
+    kind: StructVariantHandle,
+    doc: "Index into the `StructVariantHandle` table.",
+}
+define_index! {
+    name: StructVariantInstantiationIndex,
+    kind: StructVariantInstantiation,
+    doc: "Index into the `StructVariantInstantiation` table.",
+}
+define_index! {
+    name: VariantFieldHandleIndex,
+    kind: VariantFieldHandle,
+    doc: "Index into the `VariantFieldHandle` table.",
+}
+define_index! {
+    name: VariantFieldInstantiationIndex,
+    kind: VariantFieldInstantiation,
+    doc: "Index into the `VariantFieldInstantiation` table.",
+}
+
 /// Index of a local variable in a function.
 ///
 /// Bytecodes that operate on locals carry indexes to the locals of a function.
 pub type LocalIndex = u8;
 /// Max number of fields in a `StructDefinition`.
 pub type MemberCount = u16;
+/// Max number of variants in a `StructDefinition`, as well as index for variants.
+pub type VariantIndex = u16;
 /// Index into the code stream for a jump. The offset is relative to the beginning of
 /// the instruction stream.
 pub type CodeOffset = u16;
@@ -219,7 +245,10 @@ pub const NO_TYPE_ARGUMENTS: SignatureIndex = SignatureIndex(0);
 #[derive(Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct ModuleHandle {
     /// Index into the `AddressIdentifierIndex`. Identifies module-holding account's address.
     pub address: AddressIdentifierIndex,
@@ -243,7 +272,10 @@ pub struct ModuleHandle {
 #[derive(Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct StructHandle {
     /// The module that defines the type.
     pub module: ModuleHandleIndex,
@@ -267,7 +299,10 @@ impl StructHandle {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct StructTypeParameter {
     /// The type parameter constraints.
     pub constraints: AbilitySet,
@@ -285,7 +320,10 @@ pub struct StructTypeParameter {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(params = "usize"))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct FunctionHandle {
     /// The module that defines the function.
     pub module: ModuleHandleIndex,
@@ -312,10 +350,44 @@ pub struct FunctionHandle {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct FieldHandle {
     pub owner: StructDefinitionIndex,
     pub field: MemberCount,
+}
+
+/// A variant field access info
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
+#[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
+pub struct VariantFieldHandle {
+    /// The structure which defines the variant.
+    pub struct_index: StructDefinitionIndex,
+    /// The sequence of variants which share the field at the given
+    /// field offset.
+    pub variants: Vec<VariantIndex>,
+    /// The field offset.
+    pub field: MemberCount,
+}
+
+/// A struct variant access info
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
+#[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
+pub struct StructVariantHandle {
+    pub struct_index: StructDefinitionIndex,
+    pub variant: VariantIndex,
 }
 
 // DEFINITIONS:
@@ -325,10 +397,69 @@ pub struct FieldHandle {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub enum StructFieldInformation {
     Native,
     Declared(Vec<FieldDefinition>),
+    DeclaredVariants(Vec<VariantDefinition>),
+}
+
+impl StructFieldInformation {
+    /// Returns the fields described by this field information. If no variant is
+    /// provided, this returns all fields of a struct. Otherwise, the fields of the
+    /// variant are returned.
+    pub fn fields(&self, variant: Option<VariantIndex>) -> Vec<&FieldDefinition> {
+        use StructFieldInformation::*;
+        match self {
+            Native => vec![],
+            Declared(fields) => fields.iter().collect(),
+            DeclaredVariants(variants) => {
+                if let Some(variant) = variant.filter(|v| (*v as usize) < variants.len()) {
+                    variants[variant as usize].fields.iter().collect()
+                } else {
+                    vec![]
+                }
+            },
+        }
+    }
+
+    /// Returns the number of fields. This is an optimized version of
+    /// `self.fields(variant).len()`
+    pub fn field_count(&self, variant: Option<VariantIndex>) -> usize {
+        use StructFieldInformation::*;
+        match self {
+            Native => 0,
+            Declared(fields) => fields.len(),
+            DeclaredVariants(variants) => {
+                if let Some(variant) = variant.filter(|v| (*v as usize) < variants.len()) {
+                    variants[variant as usize].fields.len()
+                } else {
+                    0
+                }
+            },
+        }
+    }
+
+    /// Returns the variant definitions. For non-variant types, an empty
+    /// slice is returned.
+    pub fn variants(&self) -> &[VariantDefinition] {
+        use StructFieldInformation::*;
+        match self {
+            Native | Declared(_) => &[],
+            DeclaredVariants(variants) => variants,
+        }
+    }
+
+    /// Returns the number of variants (zero for struct or native)
+    pub fn variant_count(&self) -> usize {
+        match self {
+            StructFieldInformation::Native | StructFieldInformation::Declared(_) => 0,
+            StructFieldInformation::DeclaredVariants(variants) => variants.len(),
+        }
+    }
 }
 
 //
@@ -343,9 +474,25 @@ pub enum StructFieldInformation {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct StructDefInstantiation {
     pub def: StructDefinitionIndex,
+    pub type_parameters: SignatureIndex,
+}
+
+/// A complete or partial instantiation of a generic struct variant
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
+#[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
+pub struct StructVariantInstantiation {
+    pub handle: StructVariantHandleIndex,
     pub type_parameters: SignatureIndex,
 }
 
@@ -353,7 +500,10 @@ pub struct StructDefInstantiation {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct FunctionInstantiation {
     pub handle: FunctionHandleIndex,
     pub type_parameters: SignatureIndex,
@@ -368,9 +518,25 @@ pub struct FunctionInstantiation {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct FieldInstantiation {
     pub handle: FieldHandleIndex,
+    pub type_parameters: SignatureIndex,
+}
+
+/// A complete or partial instantiation of a variant field.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
+#[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
+pub struct VariantFieldInstantiation {
+    pub handle: VariantFieldHandleIndex,
     pub type_parameters: SignatureIndex,
 }
 
@@ -379,7 +545,10 @@ pub struct FieldInstantiation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct StructDefinition {
     /// The `StructHandle` for this `StructDefinition`. This has the name and the abilities
     /// for the type.
@@ -390,28 +559,14 @@ pub struct StructDefinition {
     pub field_information: StructFieldInformation,
 }
 
-impl StructDefinition {
-    pub fn declared_field_count(&self) -> PartialVMResult<MemberCount> {
-        match &self.field_information {
-            StructFieldInformation::Native => Err(PartialVMError::new(StatusCode::LINKER_ERROR)
-                .with_message("Looking for field in native structure. Native structures have no accessible fields.".to_string())),
-            StructFieldInformation::Declared(fields) => Ok(fields.len() as u16),
-        }
-    }
-
-    pub fn field(&self, offset: usize) -> Option<&FieldDefinition> {
-        match &self.field_information {
-            StructFieldInformation::Native => None,
-            StructFieldInformation::Declared(fields) => fields.get(offset),
-        }
-    }
-}
-
 /// A `FieldDefinition` is the definition of a field: its name and the field type.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct FieldDefinition {
     /// The name of the field.
     pub name: IdentifierIndex,
@@ -419,12 +574,27 @@ pub struct FieldDefinition {
     pub signature: TypeSignature,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
+#[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
+pub struct VariantDefinition {
+    pub name: IdentifierIndex,
+    pub fields: Vec<FieldDefinition>,
+}
+
 /// `Visibility` restricts the accessibility of the associated entity.
 /// - For function visibility, it restricts who may call into the associated function.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 #[repr(u8)]
 pub enum Visibility {
     /// Accessible within its defining module only.
@@ -441,6 +611,13 @@ pub enum Visibility {
 
 impl Visibility {
     pub const DEPRECATED_SCRIPT: u8 = 0x2;
+
+    pub fn is_public(&self) -> bool {
+        match self {
+            Self::Public => true,
+            Self::Private | Self::Friend => false,
+        }
+    }
 }
 
 impl std::convert::TryFrom<u8> for Visibility {
@@ -461,7 +638,10 @@ impl std::convert::TryFrom<u8> for Visibility {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(params = "usize"))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct FunctionDefinition {
     /// The prototype of the function (module, name, signature).
     pub function: FunctionHandleIndex,
@@ -512,7 +692,10 @@ impl FunctionDefinition {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct TypeSignature(pub SignatureToken);
 
 // TODO: remove at some point or move it in the front end (language/move-ir-compiler)
@@ -546,7 +729,10 @@ pub struct FunctionSignature {
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Ord, PartialOrd)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(params = "usize"))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct Signature(
     #[cfg_attr(
         any(test, feature = "fuzzing"),
@@ -573,291 +759,6 @@ impl Signature {
 /// type parameter in the `FunctionHandle` and `StructHandle`.
 pub type TypeParameterIndex = u16;
 
-/// An `Ability` classifies what operations are permitted for a given type
-#[repr(u8)]
-#[derive(Debug, Clone, Eq, Copy, Hash, Ord, PartialEq, PartialOrd)]
-#[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
-pub enum Ability {
-    /// Allows values of types with this ability to be copied, via CopyLoc or ReadRef
-    Copy = 0x1,
-    /// Allows values of types with this ability to be dropped, via Pop, WriteRef, StLoc, Eq, Neq,
-    /// or if left in a local when Ret is invoked
-    /// Technically also needed for numeric operations (Add, BitAnd, Shift, etc), but all
-    /// of the types that can be used with those operations have Drop
-    Drop = 0x2,
-    /// Allows values of types with this ability to exist inside a struct in global storage
-    Store = 0x4,
-    /// Allows the type to serve as a key for global storage operations: MoveTo, MoveFrom, etc.
-    Key = 0x8,
-}
-
-impl Ability {
-    fn from_u8(u: u8) -> Option<Self> {
-        match u {
-            0x1 => Some(Ability::Copy),
-            0x2 => Some(Ability::Drop),
-            0x4 => Some(Ability::Store),
-            0x8 => Some(Ability::Key),
-            _ => None,
-        }
-    }
-
-    /// For a struct with ability `a`, each field needs to have the ability `a.requires()`.
-    /// Consider a generic type Foo<t1, ..., tn>, for Foo<t1, ..., tn> to have ability `a`, Foo must
-    /// have been declared with `a` and each type argument ti must have the ability `a.requires()`
-    pub fn requires(self) -> Self {
-        match self {
-            Self::Copy => Ability::Copy,
-            Self::Drop => Ability::Drop,
-            Self::Store => Ability::Store,
-            Self::Key => Ability::Store,
-        }
-    }
-
-    /// An inverse of `requires`, where x is in a.required_by() iff x.requires() == a
-    pub fn required_by(self) -> AbilitySet {
-        match self {
-            Self::Copy => AbilitySet::EMPTY | Ability::Copy,
-            Self::Drop => AbilitySet::EMPTY | Ability::Drop,
-            Self::Store => AbilitySet::EMPTY | Ability::Store | Ability::Key,
-            Self::Key => AbilitySet::EMPTY,
-        }
-    }
-
-    /// Returns an interator that iterates over all abilities.
-    pub fn all() -> impl ExactSizeIterator<Item = Ability> {
-        use Ability::*;
-
-        [Copy, Drop, Store, Key].into_iter()
-    }
-}
-
-/// A set of `Ability`s
-#[derive(Clone, Eq, Copy, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
-pub struct AbilitySet(u8);
-
-impl AbilitySet {
-    /// Ability set containing all abilities
-    pub const ALL: Self = Self(
-        // Cannot use AbilitySet bitor because it is not const
-        (Ability::Copy as u8)
-            | (Ability::Drop as u8)
-            | (Ability::Store as u8)
-            | (Ability::Key as u8),
-    );
-    /// The empty ability set
-    pub const EMPTY: Self = Self(0);
-    /// Abilities for `Bool`, `U8`, `U64`, `U128`, and `Address`
-    pub const PRIMITIVES: AbilitySet =
-        Self((Ability::Copy as u8) | (Ability::Drop as u8) | (Ability::Store as u8));
-    /// Abilities for `Reference` and `MutableReference`
-    pub const REFERENCES: AbilitySet = Self((Ability::Copy as u8) | (Ability::Drop as u8));
-    /// Abilities for `Signer`
-    pub const SIGNER: AbilitySet = Self(Ability::Drop as u8);
-    /// Abilities for `Vector`, note they are predicated on the type argument
-    pub const VECTOR: AbilitySet =
-        Self((Ability::Copy as u8) | (Ability::Drop as u8) | (Ability::Store as u8));
-
-    pub fn singleton(ability: Ability) -> Self {
-        Self(ability as u8)
-    }
-
-    pub fn has_ability(self, ability: Ability) -> bool {
-        let a = ability as u8;
-        (a & self.0) == a
-    }
-
-    pub fn has_copy(self) -> bool {
-        self.has_ability(Ability::Copy)
-    }
-
-    pub fn has_drop(self) -> bool {
-        self.has_ability(Ability::Drop)
-    }
-
-    pub fn has_store(self) -> bool {
-        self.has_ability(Ability::Store)
-    }
-
-    pub fn has_key(self) -> bool {
-        self.has_ability(Ability::Key)
-    }
-
-    #[allow(clippy::should_implement_trait)]
-    pub fn add(self, ability: Ability) -> Self {
-        Self(self.0 | ability as u8)
-    }
-
-    pub fn remove(self, ability: Ability) -> Self {
-        Self(self.0 & (!(ability as u8)))
-    }
-
-    pub fn intersect(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-
-    pub fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    pub fn requires(self) -> Self {
-        let mut requires = Self::EMPTY;
-
-        for ability in Ability::all() {
-            if self.has_ability(ability) {
-                requires = requires.add(ability.requires())
-            }
-        }
-
-        requires
-    }
-
-    #[inline]
-    fn is_subset_bits(sub: u8, sup: u8) -> bool {
-        (sub & sup) == sub
-    }
-
-    pub fn is_subset(self, other: Self) -> bool {
-        Self::is_subset_bits(self.0, other.0)
-    }
-
-    /// For a polymorphic type, its actual abilities correspond to its declared abilities but
-    /// predicated on its non-phantom type arguments having that ability. For `Key`, instead of needing
-    /// the same ability, the type arguments need `Store`.
-    pub fn polymorphic_abilities<I1, I2>(
-        declared_abilities: Self,
-        declared_phantom_parameters: I1,
-        type_arguments: I2,
-    ) -> PartialVMResult<Self>
-    where
-        I1: IntoIterator<Item = bool>,
-        I2: IntoIterator<Item = Self>,
-        I1::IntoIter: ExactSizeIterator,
-        I2::IntoIter: ExactSizeIterator,
-    {
-        let declared_phantom_parameters = declared_phantom_parameters.into_iter();
-        let type_arguments = type_arguments.into_iter();
-
-        if declared_phantom_parameters.len() != type_arguments.len() {
-            return Err(
-                PartialVMError::new(StatusCode::VERIFIER_INVARIANT_VIOLATION).with_message(
-                    "the length of `declared_phantom_parameters` doesn't match the length of `type_arguments`".to_string(),
-                ),
-            );
-        }
-
-        // Conceptually this is performing the following operation:
-        // For any ability 'a' in `declared_abilities`
-        // 'a' is in the result only if
-        //   for all (abi_i, is_phantom_i) in `type_arguments` s.t. !is_phantom then a.required() is a subset of abi_i
-        //
-        // So to do this efficiently, we can determine the required_by set for each ti
-        // and intersect them together along with the declared abilities
-        // This only works because for any ability y, |y.requires()| == 1
-        let abs = type_arguments
-            .zip(declared_phantom_parameters)
-            .filter(|(_, is_phantom)| !is_phantom)
-            .map(|(ty_arg_abilities, _)| {
-                ty_arg_abilities
-                    .into_iter()
-                    .map(|a| a.required_by())
-                    .fold(AbilitySet::EMPTY, AbilitySet::union)
-            })
-            .fold(declared_abilities, |acc, ty_arg_abilities| {
-                acc.intersect(ty_arg_abilities)
-            });
-        Ok(abs)
-    }
-
-    pub fn from_u8(byte: u8) -> Option<Self> {
-        // If there is a bit set in the read `byte`, that bit must be set in the
-        // `AbilitySet` containing all `Ability`s
-        // This corresponds the byte being a bit set subset of ALL
-        // The byte is a subset of ALL if the intersection of the two is the original byte
-        if Self::is_subset_bits(byte, Self::ALL.0) {
-            Some(Self(byte))
-        } else {
-            None
-        }
-    }
-
-    pub fn into_u8(self) -> u8 {
-        self.0
-    }
-}
-
-impl BitOr<Ability> for AbilitySet {
-    type Output = Self;
-
-    fn bitor(self, rhs: Ability) -> Self {
-        AbilitySet(self.0 | (rhs as u8))
-    }
-}
-
-impl BitOr<AbilitySet> for AbilitySet {
-    type Output = Self;
-
-    fn bitor(self, rhs: Self) -> Self {
-        AbilitySet(self.0 | rhs.0)
-    }
-}
-
-pub struct AbilitySetIterator {
-    set: AbilitySet,
-    idx: u8,
-}
-
-impl Iterator for AbilitySetIterator {
-    type Item = Ability;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.idx <= 0x8 {
-            let next = Ability::from_u8(self.set.0 & self.idx);
-            self.idx <<= 1;
-            if next.is_some() {
-                return next;
-            }
-        }
-        None
-    }
-}
-
-impl IntoIterator for AbilitySet {
-    type IntoIter = AbilitySetIterator;
-    type Item = Ability;
-
-    fn into_iter(self) -> Self::IntoIter {
-        AbilitySetIterator {
-            idx: 0x1,
-            set: self,
-        }
-    }
-}
-
-impl std::fmt::Debug for AbilitySet {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(f, "[")?;
-        for ability in *self {
-            write!(f, "{:?}, ", ability)?;
-        }
-        write!(f, "]")
-    }
-}
-
-#[cfg(any(test, feature = "fuzzing"))]
-impl Arbitrary for AbilitySet {
-    type Parameters = ();
-    type Strategy = BoxedStrategy<Self>;
-
-    fn arbitrary_with(_params: Self::Parameters) -> Self::Strategy {
-        proptest::bits::u8::masked(AbilitySet::ALL.0)
-            .prop_map(|u| AbilitySet::from_u8(u).expect("proptest mask failed for AbilitySet"))
-            .boxed()
-    }
-}
-
 /// An `AccessSpecifier` describes the resources accessed by a function.
 /// Here are some examples on source level:
 /// ```notest
@@ -874,7 +775,10 @@ impl Arbitrary for AbilitySet {
 /// ```
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Debug)]
 #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
-#[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
+#[cfg_attr(
+    any(test, feature = "fuzzing"),
+    derive(proptest_derive::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct AccessSpecifier {
     /// The kind of access: read, write, or both.
     pub kind: AccessKind,
@@ -900,7 +804,10 @@ impl AccessSpecifier {
 /// The kind of specified access.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Debug)]
 #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
-#[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
+#[cfg_attr(
+    any(test, feature = "fuzzing"),
+    derive(proptest_derive::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub enum AccessKind {
     Reads,
     Writes,
@@ -943,7 +850,10 @@ impl fmt::Display for AccessKind {
 /// The specification of a resource in an access specifier.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Debug)]
 #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
-#[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
+#[cfg_attr(
+    any(test, feature = "fuzzing"),
+    derive(proptest_derive::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub enum ResourceSpecifier {
     /// Any resource
     Any,
@@ -960,7 +870,10 @@ pub enum ResourceSpecifier {
 /// The specification of an address in an access specifier.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Debug)]
 #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
-#[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
+#[cfg_attr(
+    any(test, feature = "fuzzing"),
+    derive(proptest_derive::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub enum AddressSpecifier {
     /// Resource can be stored at any address.
     Any,
@@ -987,7 +900,10 @@ pub enum AddressSpecifier {
 /// A SignatureToken can express more types than the VM can handle safely, and correctness is
 /// enforced by the verifier.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub enum SignatureToken {
     /// Boolean, `true` or `false`.
     Bool,
@@ -1003,6 +919,8 @@ pub enum SignatureToken {
     Signer,
     /// Vector
     Vector(Box<SignatureToken>),
+    /// Function, with n argument types and m result types, and an associated ability set.
+    Function(Vec<SignatureToken>, Vec<SignatureToken>, AbilitySet),
     /// User defined type
     Struct(StructHandleIndex),
     StructInstantiation(StructHandleIndex, Vec<SignatureToken>),
@@ -1045,6 +963,11 @@ impl<'a> Iterator for SignatureTokenPreorderTraversalIter<'a> {
                         self.stack.extend(inner_toks.iter().rev())
                     },
 
+                    Function(args, result, _) => {
+                        self.stack.extend(args.iter().rev());
+                        self.stack.extend(result.iter().rev());
+                    },
+
                     Signer | Bool | Address | U8 | U16 | U32 | U64 | U128 | U256 | Struct(_)
                     | TypeParameter(_) => (),
                 }
@@ -1077,6 +1000,13 @@ impl<'a> Iterator for SignatureTokenPreorderTraversalIterWithDepth<'a> {
                     StructInstantiation(_, inner_toks) => self
                         .stack
                         .extend(inner_toks.iter().map(|tok| (tok, depth + 1)).rev()),
+
+                    Function(args, result, _) => {
+                        self.stack
+                            .extend(args.iter().map(|tok| (tok, depth + 1)).rev());
+                        self.stack
+                            .extend(result.iter().map(|tok| (tok, depth + 1)).rev());
+                    },
 
                     Signer | Bool | Address | U8 | U16 | U32 | U64 | U128 | U256 | Struct(_)
                     | TypeParameter(_) => (),
@@ -1138,11 +1068,14 @@ impl std::fmt::Debug for SignatureToken {
             SignatureToken::Address => write!(f, "Address"),
             SignatureToken::Signer => write!(f, "Signer"),
             SignatureToken::Vector(boxed) => write!(f, "Vector({:?})", boxed),
+            SignatureToken::Function(args, result, abilities) => {
+                write!(f, "Function({:?}, {:?}, {})", args, result, abilities)
+            },
+            SignatureToken::Reference(boxed) => write!(f, "Reference({:?})", boxed),
             SignatureToken::Struct(idx) => write!(f, "Struct({:?})", idx),
             SignatureToken::StructInstantiation(idx, types) => {
                 write!(f, "StructInstantiation({:?}, {:?})", idx, types)
             },
-            SignatureToken::Reference(boxed) => write!(f, "Reference({:?})", boxed),
             SignatureToken::MutableReference(boxed) => write!(f, "MutableReference({:?})", boxed),
             SignatureToken::TypeParameter(idx) => write!(f, "TypeParameter({:?})", idx),
         }
@@ -1150,35 +1083,7 @@ impl std::fmt::Debug for SignatureToken {
 }
 
 impl SignatureToken {
-    /// Returns the "value kind" for the `SignatureToken`
-    #[inline]
-    pub fn signature_token_kind(&self) -> SignatureTokenKind {
-        // TODO: SignatureTokenKind is out-dated. fix/update/remove SignatureTokenKind and see if
-        // this function needs to be cleaned up
-        use SignatureToken::*;
-
-        match self {
-            Reference(_) => SignatureTokenKind::Reference,
-            MutableReference(_) => SignatureTokenKind::MutableReference,
-            Bool
-            | U8
-            | U16
-            | U32
-            | U64
-            | U128
-            | U256
-            | Address
-            | Signer
-            | Struct(_)
-            | StructInstantiation(_, _)
-            | Vector(_) => SignatureTokenKind::Value,
-            // TODO: This is a temporary hack to please the verifier. SignatureTokenKind will soon
-            // be completely removed. `SignatureTokenView::kind()` should be used instead.
-            TypeParameter(_) => SignatureTokenKind::Value,
-        }
-    }
-
-    // Returns `true` if the `SignatureToken` is an integer type.
+    /// Returns true if the token is an integer type.
     pub fn is_integer(&self) -> bool {
         use SignatureToken::*;
         match self {
@@ -1187,6 +1092,7 @@ impl SignatureToken {
             | Address
             | Signer
             | Vector(_)
+            | Function(..)
             | Struct(_)
             | StructInstantiation(_, _)
             | Reference(_)
@@ -1225,11 +1131,26 @@ impl SignatureToken {
             Bool | U8 | U16 | U32 | U64 | U128 | U256 | Address => true,
             Vector(inner) => inner.is_valid_for_constant(),
             Signer
+            | Function(..)
             | Struct(_)
             | StructInstantiation(_, _)
             | Reference(_)
             | MutableReference(_)
             | TypeParameter(_) => false,
+        }
+    }
+
+    /// Returns true if this type can have assigned a value of the source type.
+    /// For function types, this is true if the argument and result types
+    /// are equal, and if this function type's ability set is a subset of the other
+    /// one. For all other types, they must be equal
+    pub fn is_assignable_from(&self, source: &SignatureToken) -> bool {
+        match (self, source) {
+            (
+                SignatureToken::Function(args1, results1, abs1),
+                SignatureToken::Function(args2, results2, abs2),
+            ) => args1 == args2 && results1 == results2 && abs1.is_subset(*abs2),
+            _ => self == source,
         }
     }
 
@@ -1260,12 +1181,48 @@ impl SignatureToken {
             stack: vec![(self, 1)],
         }
     }
+
+    pub fn num_nodes(&self) -> usize {
+        self.preorder_traversal().count()
+    }
+
+    pub fn instantiate(&self, subst_mapping: &[SignatureToken]) -> SignatureToken {
+        use SignatureToken::*;
+        let inst_vec = |v: &[SignatureToken]| -> Vec<SignatureToken> {
+            v.iter().map(|ty| ty.instantiate(subst_mapping)).collect()
+        };
+        match self {
+            Bool => Bool,
+            U8 => U8,
+            U16 => U16,
+            U32 => U32,
+            U64 => U64,
+            U128 => U128,
+            U256 => U256,
+            Address => Address,
+            Signer => Signer,
+            Vector(ty) => Vector(Box::new(ty.instantiate(subst_mapping))),
+            Function(args, result, abilities) => {
+                Function(inst_vec(args), inst_vec(result), *abilities)
+            },
+            Struct(idx) => Struct(*idx),
+            StructInstantiation(idx, struct_type_args) => {
+                StructInstantiation(*idx, inst_vec(struct_type_args))
+            },
+            Reference(ty) => Reference(Box::new(ty.instantiate(subst_mapping))),
+            MutableReference(ty) => MutableReference(Box::new(ty.instantiate(subst_mapping))),
+            TypeParameter(idx) => subst_mapping[*idx as usize].clone(),
+        }
+    }
 }
 
 /// A `Constant` is a serialized value along with its type. That type will be deserialized by the
-/// loader/evauluator
+/// loader/evaluator
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct Constant {
     pub type_: SignatureToken,
     pub data: Vec<u8>,
@@ -1275,7 +1232,10 @@ pub struct Constant {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(params = "usize"))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct CodeUnit {
     /// List of locals type. All locals are typed.
     pub locals: SignatureIndex,
@@ -1287,503 +1247,1539 @@ pub struct CodeUnit {
     pub code: Vec<Bytecode>,
 }
 
+// Note: custom attributes are used to specify the bytecode instructions.
+//
+// Please refer to the `move-bytecode-spec` crate for
+//   1. The list of supported attributes and whether they are always required
+//     a. Currently three attributes are required: `group`, `description`, `semantics`
+//   2. The list of groups allowed
+// In the rare case of needing to add new attributes or groups, you can also add them there.
+//
+// Common notations for the semantics:
+//   - `stack >> a`: pop an item off the stack and store it in variable a
+//   - `stack << a`: push the value stored in variable a onto the stack
+
 /// `Bytecode` is a VM instruction of variable size. The type of the bytecode (opcode) defines
 /// the size of the bytecode.
 ///
 /// Bytecodes operate on a stack machine and each bytecode has side effect on the stack and the
 /// instruction stream.
+#[bytecode_spec]
 #[derive(Clone, Hash, Eq, VariantCount, PartialEq)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(proptest_derive::Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub enum Bytecode {
-    /// Pop and discard the value at the top of the stack.
-    /// The value on the stack must be an copyable type.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., value -> ...```
+    #[group = "stack_and_local"]
+    #[description = "Pop and discard the value at the top of the stack. The value on the stack must be an copyable type."]
+    #[semantics = "stack >> _"]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty has drop
+    "#]
     Pop,
-    /// Return from function, possibly with values according to the return types in the
-    /// function signature. The returned values are pushed on the stack.
-    /// The function signature of the function being executed defines the semantic of
-    /// the Ret opcode.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., arg_val(1), ..., arg_val(n) -> ..., return_val(1), ..., return_val(n)```
+
+    #[group = "control_flow"]
+    #[description = r#"
+        Return from current function call, possibly with values according to the return types in the function signature.
+
+        The returned values need to be pushed on the stack prior to the return instruction.
+    "#]
+    #[semantics = r#"
+        call_stack >> current_frame
+        // The frame of the function being returned from is dropped.
+
+        current_frame.pc += 1
+    "#]
     Ret,
-    /// Branch to the instruction at position `CodeOffset` if the value at the top of the stack
-    /// is true. Code offsets are relative to the start of the instruction stream.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., bool_value -> ...```
+
+    #[group = "control_flow"]
+    #[description = r#"
+        Branch to the instruction at position `code_offset` if the value at the top of the stack is true.
+        Code offsets are relative to the start of the function body.
+    "#]
+    #[static_operands = "[code_offset]"]
+    #[semantics = r#"
+        stack >> flag
+        if flag is true
+            current_frame.pc = code_offset
+        else
+            current_frame.pc += 1
+    "#]
+    #[runtime_check_prologue = "ty_stack >> _"]
     BrTrue(CodeOffset),
-    /// Branch to the instruction at position `CodeOffset` if the value at the top of the stack
-    /// is false. Code offsets are relative to the start of the instruction stream.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., bool_value -> ...```
+
+    #[group = "control_flow"]
+    #[description = r#"
+        Branch to the instruction at position `code_offset` if the value at the top of the stack is false.
+        Code offsets are relative to the start of the function body.
+    "#]
+    #[static_operands = "[code_offset]"]
+    #[semantics = r#"
+        stack >> flag
+        if flag is false
+            current_frame.pc = code_offset
+        else
+            current_frame.pc += 1
+    "#]
+    #[runtime_check_prologue = "ty_stack >> _"]
     BrFalse(CodeOffset),
-    /// Branch unconditionally to the instruction at position `CodeOffset`. Code offsets are
-    /// relative to the start of the instruction stream.
-    ///
-    /// Stack transition: none
+
+    #[group = "control_flow"]
+    #[description = r#"
+        Branch unconditionally to the instruction at position `code_offset`.
+        Code offsets are relative to the start of a function body.
+    "#]
+    #[static_operands = "[code_offset]"]
+    #[semantics = "current_frame.pc = code_offset"]
     Branch(CodeOffset),
-    /// Push a U8 constant onto the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., u8_value```
+
+    #[group = "stack_and_local"]
+    #[description = "Push a u8 constant onto the stack."]
+    #[static_operands = "[u8_value]"]
+    #[semantics = "stack << u8_value"]
+    #[runtime_check_epilogue = "ty_stack << u8"]
     LdU8(u8),
-    /// Push a U64 constant onto the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., u64_value```
+
+    #[group = "stack_and_local"]
+    #[description = "Push a u64 constant onto the stack."]
+    #[static_operands = "[u64_value]"]
+    #[semantics = "stack << u64_value"]
+    #[runtime_check_epilogue = "ty_stack << u64"]
     LdU64(u64),
-    /// Push a U128 constant onto the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., u128_value```
+
+    #[group = "stack_and_local"]
+    #[description = "Push a u128 constant onto the stack."]
+    #[static_operands = "[u128_value]"]
+    #[semantics = "stack << u128_value"]
+    #[runtime_check_epilogue = "ty_stack << u128"]
     LdU128(u128),
-    /// Convert the value at the top of the stack into u8.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., integer_value -> ..., u8_value```
+
+    #[group = "casting"]
+    #[description = r#"
+        Convert the integer value at the top of the stack into a u8.
+        An arithmetic error will be raised if the value cannot be represented as a u8.
+    "#]
+    #[semantics = r#"
+        stack >> int_val
+        if int_val > u8::MAX:
+            arithmetic error
+        else:
+            stack << int_val as u8
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> _
+        ty_stack << u8
+    "#]
     CastU8,
-    /// Convert the value at the top of the stack into u64.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., integer_value -> ..., u8_value```
+
+    #[group = "casting"]
+    #[description = r#"
+        Convert the integer value at the top of the stack into a u64.
+        An arithmetic error will be raised if the value cannot be represented as a u64.
+    "#]
+    #[semantics = r#"
+        stack >> int_val
+        if int_val > u64::MAX:
+            arithmetic error
+        else:
+            stack << int_val as u64
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> _
+        ty_stack << u64
+    "#]
     CastU64,
-    /// Convert the value at the top of the stack into u128.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., integer_value -> ..., u128_value```
+
+    #[group = "casting"]
+    #[description = r#"
+        Convert the integer value at the top of the stack into a u128.
+        An arithmetic error will be raised if the value cannot be represented as a u128.
+    "#]
+    #[semantics = r#"
+        stack >> int_val
+        if int_val > u128::MAX:
+            arithmetic error
+        else:
+            stack << int_val as u128
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> _
+        ty_stack << u128
+    "#]
     CastU128,
-    /// Push a `Constant` onto the stack. The value is loaded and deserialized (according to its
-    /// type) from the the `ConstantPool` via `ConstantPoolIndex`
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., value```
+
+    #[group = "stack_and_local"]
+    #[description = r#"
+        Push a constant value onto the stack.
+        The value is loaded and deserialized (according to its type) from the the file format.
+    "#]
+    #[static_operands = "[const_idx]"]
+    #[semantics = "stack << constants[const_idx]"]
+    #[runtime_check_epilogue = "ty_stack << const_ty"]
+    #[gas_type_creation_tier_1 = "const_ty"]
     LdConst(ConstantPoolIndex),
-    /// Push `true` onto the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., true```
+
+    #[group = "stack_and_local"]
+    #[description = "Push a true value onto the stack."]
+    #[semantics = "stack << true"]
+    #[runtime_check_epilogue = "ty_stack << bool"]
     LdTrue,
-    /// Push `false` onto the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., false```
+
+    #[group = "stack_and_local"]
+    #[description = "Push a false value onto the stack."]
+    #[semantics = "stack << false"]
+    #[runtime_check_epilogue = "ty_stack << bool"]
     LdFalse,
-    /// Push the local identified by `LocalIndex` onto the stack. The value is copied and the
-    /// local is still safe to use.
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., value```
+
+    #[group = "stack_and_local"]
+    #[description = r#"
+        Push the local identified by the local index onto the stack.
+        The value must be copyable and the local remains safe to use.
+    "#]
+    #[semantics = r#"
+        stack << locals[local_idx]
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty = clone local_ty
+        assert ty has copy
+        ty_stack << ty
+    "#]
     CopyLoc(LocalIndex),
-    /// Push the local identified by `LocalIndex` onto the stack. The local is moved and it is
-    /// invalid to use from that point on, unless a store operation writes to the local before
-    /// any read to that local.
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., value```
+
+    #[group = "stack_and_local"]
+    #[description = r#"
+        Move the local identified by the local index onto the stack.
+
+        Once moved, the local becomes invalid to use, unless a store operation writes
+        to the local before any read to that local.
+    "#]
+    #[static_operands = "[local_idx]"]
+    #[semantics = r#"
+        stack << locals[local_idx]
+        locals[local_idx] = invalid
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty = clone local_ty
+        ty_stack << ty
+    "#]
     MoveLoc(LocalIndex),
-    /// Pop value from the top of the stack and store it into the function locals at
-    /// position `LocalIndex`.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., value -> ...```
+
+    #[group = "stack_and_local"]
+    #[description = r#"
+        Pop value from the top of the stack and store it into the local identified by the local index.
+
+        If the local contains an old value, then that value is dropped.
+    "#]
+    #[static_operands = "[local_idx]"]
+    #[semantics = "stack >> locals[local_idx]"]
+    #[runtime_check_prologue = r#"
+        ty = clone local_ty
+        ty_stack >> val_ty
+        assert ty == val_ty
+        if locals[local_idx] != invalid
+            assert ty has drop
+    "#]
     StLoc(LocalIndex),
-    /// Call a function. The stack has the arguments pushed first to last.
-    /// The arguments are consumed and pushed to the locals of the function.
-    /// Return values are pushed on the stack and available to the caller.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., arg(1), arg(2), ...,  arg(n) -> ..., return_value(1), return_value(2), ...,
-    /// return_value(k)```
+
+    #[group = "control_flow"]
+    #[static_operands = "[func_handle_idx]"]
+    #[description = r#"
+        Call a function. The stack has the arguments pushed first to last.
+        The arguments are consumed and pushed to the locals of the function.
+
+        Return values are pushed onto the stack from the first to the last and
+        available to the caller after returning from the callee.
+    "#]
+    #[semantics = r#"
+        func = <func from handle or instantiation>
+        // Here `func` is loaded from the file format, containing information like the
+        // the function signature, the locals, and the body.
+
+        ty_args = if func.is_generic then func.ty_args else []
+
+        n = func.num_params
+        stack >> arg_n-1
+        ..
+        stack >> arg_0
+
+        if func.is_native()
+            call_native(func.name, ty_args, args = [arg_0, .., arg_n-1])
+            current_frame.pc += 1
+        else
+            call_stack << current_frame
+
+            current_frame = new_frame_from_func(
+                func,
+                ty_args,
+                locals = [arg_0, .., arg_n-1, invalid, ..]
+                                           // ^ other locals
+            )
+    "#]
+    #[runtime_check_epilogue = r#"
+        assert func visibility rules
+        for i in 0..#args:
+            ty_stack >> ty
+            assert ty == locals[#args -  i - 1]
+    "#]
+    #[gas_type_creation_tier_1 = "local_tys"]
     Call(FunctionHandleIndex),
+
+    #[group = "control_flow"]
+    #[static_operands = "[func_inst_idx]"]
+    #[description = "Generic version of `Call`."]
+    #[semantics = "See `Call`."]
+    #[runtime_check_epilogue = "See `Call`."]
+    #[gas_type_creation_tier_0 = "ty_args"]
+    #[gas_type_creation_tier_1 = "local_tys"]
     CallGeneric(FunctionInstantiationIndex),
-    /// Create an instance of the type specified via `StructHandleIndex` and push it on the stack.
-    /// The values of the fields of the struct, in the order they appear in the struct declaration,
-    /// must be pushed on the stack. All fields must be provided.
-    ///
-    /// A Pack instruction must fully initialize an instance.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., field(1)_value, field(2)_value, ..., field(n)_value -> ..., instance_value```
+
+    #[group = "struct"]
+    #[static_operands = "[struct_def_idx]"]
+    #[description = r#"
+        Create an instance of the struct specified by the struct def index and push it on the stack.
+        The values of the fields of the struct, in the order they appear in the struct declaration,
+        must be pushed on the stack. All fields must be provided.
+    "#]
+    #[semantics = r#"
+        stack >> field_n-1
+        ...
+        stack >> field_0
+        stack << struct { field_0, ..., field_n-1 }
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> tys
+        assert tys == field_tys
+        check field abilities
+        ty_stack << struct_ty
+    "#]
     Pack(StructDefinitionIndex),
+    #[group = "struct"]
+    #[static_operands = "[struct_inst_idx]"]
+    #[description = "Generic version of `Pack`."]
+    #[semantics = "See `Pack`."]
+    #[runtime_check_epilogue = "See `Pack`."]
+    #[gas_type_creation_tier_0 = "struct_ty"]
+    #[gas_type_creation_tier_1 = "field_tys"]
     PackGeneric(StructDefInstantiationIndex),
-    /// Destroy an instance of a type and push the values bound to each field on the
-    /// stack.
-    ///
-    /// The values of the fields of the instance appear on the stack in the order defined
-    /// in the struct definition.
-    ///
-    /// This order makes `Unpack<T>` the inverse of `Pack<T>`. So `Unpack<T>; Pack<T>` is the identity
-    /// for struct `T`.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., instance_value -> ..., field(1)_value, field(2)_value, ..., field(n)_value```
+
+    #[group = "variant"]
+    #[static_operands = "[struct_variant_handle_idx]"]
+    #[description = r#"
+        Create an instance of the struct variant specified by the handle and push it on the stack.
+        The values of the fields of the variant, in the order they are determined by the
+        declaration, must be pushed on the stack. All fields must be provided.
+    "#]
+    #[semantics = r#"
+        stack >> field_n-1
+        ...
+        stack >> field_0
+        stack << struct/variant { field_0, ..., field_n-1 }
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> tys
+        assert tys == field_tys
+        check field abilities
+        ty_stack << struct_ty
+    "#]
+    PackVariant(StructVariantHandleIndex),
+
+    #[group = "variant"]
+    #[static_operands = "[struct_variant_inst_idx]"]
+    #[description = "Generic version of `PackVariant`."]
+    #[semantics = "See `PackVariant`."]
+    #[runtime_check_epilogue = "See `PackVariant`."]
+    #[gas_type_creation_tier_0 = "struct_ty"]
+    #[gas_type_creation_tier_1 = "field_tys"]
+    PackVariantGeneric(StructVariantInstantiationIndex),
+
+    #[group = "struct"]
+    #[static_operands = "[struct_def_idx]"]
+    #[description = "Destroy an instance of a struct and push the values bound to each field onto the stack."]
+    #[semantics = r#"
+        stack >> struct { field_0, .., field_n-1 }
+        stack << field_0
+        ...
+        stack << field_n-1
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == struct_ty
+        ty_stack << field_tys
+    "#]
     Unpack(StructDefinitionIndex),
+    #[group = "struct"]
+    #[static_operands = "[struct_inst_idx]"]
+    #[description = "Generic version of `Unpack`."]
+    #[semantics = "See `Unpack`."]
+    #[runtime_check_epilogue = "See `Unpack`."]
+    #[gas_type_creation_tier_0 = "struct_ty"]
+    #[gas_type_creation_tier_1 = "field_tys"]
     UnpackGeneric(StructDefInstantiationIndex),
-    /// Read a reference. The reference is on the stack, it is consumed and the value read is
-    /// pushed on the stack.
-    ///
-    /// Reading a reference performs a copy of the value referenced.
-    /// As such, ReadRef requires that the type of the value has the `Copy` ability.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., reference_value -> ..., value```
+
+    #[group = "variant"]
+    #[static_operands = "[struct_variant_handle_idx]"]
+    #[description = r#"
+        If the value on the stack is of the specified variant, destroy it and push the
+        values bound to each field onto the stack.
+
+        Aborts if the value is not of the specified variant.
+    "#]
+    #[semantics = r#"
+        if struct_ref is variant_field.variant
+            stack >> struct/variant { field_0, .., field_n-1 }
+            stack << field_0
+            ...
+            stack << field_n-1
+        else
+            error
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == struct_ty
+        ty_stack << field_tys
+    "#]
+    #[gas_type_creation_tier_0 = "struct_ty"]
+    #[gas_type_creation_tier_1 = "field_tys"]
+    UnpackVariant(StructVariantHandleIndex),
+
+    #[group = "struct"]
+    #[static_operands = "[struct_variant_inst_idx]"]
+    #[description = "Generic version of `UnpackVariant`."]
+    #[semantics = "See `UnpackVariant`."]
+    #[runtime_check_epilogue = "See `UnpackVariant`."]
+    #[gas_type_creation_tier_0 = "struct_ty"]
+    #[gas_type_creation_tier_1 = "field_tys"]
+    UnpackVariantGeneric(StructVariantInstantiationIndex),
+
+    #[group = "variant"]
+    #[static_operands = "[struct_variant_handle_idx]"]
+    #[description = r#"
+        Tests whether the reference value on the stack is of the specified variant.
+    "#]
+    #[semantics = r#"
+        stack >> struct_ref
+        stack << struct_if is variant
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == &struct_ty
+        ty_stack << bool
+    "#]
+    TestVariant(StructVariantHandleIndex),
+
+    #[group = "variant"]
+    #[description = "Generic version of `TestVariant`."]
+    #[semantics = "See `TestVariant`."]
+    #[runtime_check_epilogue = "See `TestVariant`."]
+    TestVariantGeneric(StructVariantInstantiationIndex),
+
+    #[group = "reference"]
+    #[description = r#"
+        Consume the reference at the top of the stack, read the value referenced, and push the value onto the stack.
+
+        Reading a reference performs a copy of the value referenced.
+        As such, ReadRef requires that the type of the value has the `copy` ability.
+    "#]
+    #[semantics = r#"
+        stack >> ref
+        stack << copy *ref
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ref_ty
+        assert ty has copy
+    "#]
     ReadRef,
-    /// Write to a reference. The reference and the value are on the stack and are consumed.
-    ///
-    ///
-    /// WriteRef requires that the type of the value has the `Drop` ability as the previous value
-    /// is lost
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., value, reference_value -> ...```
+
+    #[group = "reference"]
+    #[description = r#"
+        Pop a reference and a value off the stack, and write the value to the reference.
+
+        It is required that the type of the value has the `drop` ability, as the previous value is dropped.
+    "#]
+    #[semantics = r#"
+        stack >> ref
+        stack >> val
+        *ref = val
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ref_ty
+        ty_stack >> val_ty
+        assert ref_ty == &val_ty
+        assert val_ty has drop
+    "#]
     WriteRef,
-    /// Convert a mutable reference to an immutable reference.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., reference_value -> ..., reference_value```
+
+    #[group = "reference"]
+    #[description = r#"
+        Convert a mutable reference into an immutable reference.
+    "#]
+    #[semantics = r#"
+        stack >> mutable_ref
+        stack << mutable_ref.into_immutable()
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> &mut ty
+        ty_stack << &ty
+    "#]
     FreezeRef,
-    /// Load a mutable reference to a local identified by LocalIndex.
-    ///
-    /// The local must not be a reference.
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., reference```
+
+    #[group = "stack_and_local"]
+    #[description = "Load a mutable reference to a local identified by the local index."]
+    #[static_operands = "[local_idx]"]
+    #[semantics = "stack << &mut locals[local_idx]"]
+    #[runtime_check_epilogue = r#"
+        ty = clone local_ty
+        ty_stack << &mut ty
+    "#]
     MutBorrowLoc(LocalIndex),
-    /// Load an immutable reference to a local identified by LocalIndex.
-    ///
-    /// The local must not be a reference.
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., reference```
+
+    #[group = "stack_and_local"]
+    #[description = "Load an immutable reference to a local identified by the local index."]
+    #[static_operands = "[local_idx]"]
+    #[semantics = "stack << &locals[local_idx]"]
+    #[runtime_check_epilogue = r#"
+        ty << clone local_ty
+        ty_stack << &ty
+    "#]
     ImmBorrowLoc(LocalIndex),
-    /// Load a mutable reference to a field identified by `FieldHandleIndex`.
-    /// The top of the stack must be a mutable reference to a type that contains the field
-    /// definition.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., reference -> ..., field_reference```
+
+    #[group = "struct"]
+    #[static_operands = "[field_handle_idx]"]
+    #[description = r#"
+        Consume the reference to a struct at the top of the stack,
+        and load a mutable reference to the field identified by the field handle index.
+    "#]
+    #[semantics = r#"
+        stack >> struct_ref
+        stack << &mut (*struct_ref).field(field_index)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == &mut struct_ty
+        ty_stack << &mut field_ty
+    "#]
     MutBorrowField(FieldHandleIndex),
-    /// Load a mutable reference to a field identified by `FieldInstantiationIndex`.
-    /// The top of the stack must be a mutable reference to a type that contains the field
-    /// definition.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., reference -> ..., field_reference```
+
+    #[group = "variant"]
+    #[static_operands = "[variant_field_handle_idx]"]
+    #[description = r#"
+        Consume the reference to a struct at the top of the stack,
+        and provided that the struct is of the given variant, load a mutable reference to
+        the field of the variant.
+
+        Aborts execution if the operand is not of the given variant.
+    "#]
+    #[semantics = r#"
+        stack >> struct_ref
+        if struct_ref is variant
+            stack << &mut (*struct_ref).field(variant_field.field_index)
+        else
+            error
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == &mut struct_ty
+        ty_stack << &mut field_ty
+    "#]
+    MutBorrowVariantField(VariantFieldHandleIndex),
+
+    #[group = "struct"]
+    #[static_operands = "[field_inst_idx]"]
+    #[description = r#"
+        Consume the reference to a generic struct at the top of the stack,
+        and load a mutable reference to the field identified by the field handle index.
+    "#]
+    #[semantics = r#"
+        stack >> struct_ref
+        stack << &mut (*struct_ref).field(field_index)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == &struct_ty
+        ty_stack << &mut field_ty
+    "#]
+    #[gas_type_creation_tier_0 = "struct_ty"]
+    #[gas_type_creation_tier_1 = "field_ty"]
     MutBorrowFieldGeneric(FieldInstantiationIndex),
-    /// Load an immutable reference to a field identified by `FieldHandleIndex`.
-    /// The top of the stack must be a reference to a type that contains the field definition.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., reference -> ..., field_reference```
+
+    #[group = "variant"]
+    #[static_operands = "[variant_field_inst_idx]"]
+    #[description = r#"
+        Consume the reference to a generic struct at the top of the stack,
+        and provided that the struct is of the given variant, load a mutable reference to
+        the field of the variant.
+
+        Aborts execution if the operand is not of the given variant.
+    "#]
+    #[semantics = r#"
+        stack >> struct_ref
+        if struct_ref is variant_field
+            stack << &mut (*struct_ref).field(field_index)
+        else
+            error
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == &mut struct_ty
+        ty_stack << &mut field_ty
+    "#]
+    MutBorrowVariantFieldGeneric(VariantFieldInstantiationIndex),
+
+    #[group = "struct"]
+    #[static_operands = "[field_handle_idx]"]
+    #[description = r#"
+        Consume the reference to a struct at the top of the stack,
+        and load an immutable reference to the field identified by the field handle index.
+    "#]
+    #[semantics = r#"
+        stack >> struct_ref
+        stack << &(*struct_ref).field(field_index)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == &struct_ty
+        ty_stack << &field_ty
+    "#]
     ImmBorrowField(FieldHandleIndex),
-    /// Load an immutable reference to a field identified by `FieldInstantiationIndex`.
-    /// The top of the stack must be a reference to a type that contains the field definition.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., reference -> ..., field_reference```
+
+    #[group = "variant"]
+    #[static_operands = "[variant_field_inst_idx]"]
+    #[description = r#"
+        Consume the reference to a struct at the top of the stack,
+        and provided that the struct is of the given variant, load an
+        immutable reference to the field of the variant.
+
+        Aborts execution if the operand is not of the given variant.
+    "#]
+    #[semantics = r#"
+        stack >> struct_ref
+        if struct_ref is variant
+            stack << &(*struct_ref).field(field_index)
+        else
+            error
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == &mut struct_ty
+        ty_stack << &mut field_ty
+    "#]
+    ImmBorrowVariantField(VariantFieldHandleIndex),
+
+    #[group = "struct"]
+    #[static_operands = "[field_inst_idx]"]
+    #[description = r#"
+        Consume the reference to a generic struct at the top of the stack,
+        and load an immutable reference to the field identified by the
+        field handle index.
+    "#]
+    #[semantics = r#"
+        stack >> struct_ref
+        stack << &(*struct_ref).field(field_index)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == &struct_ty
+        ty_stack << &field_ty
+    "#]
+    #[gas_type_creation_tier_0 = "struct_ty"]
+    #[gas_type_creation_tier_1 = "field_ty"]
     ImmBorrowFieldGeneric(FieldInstantiationIndex),
-    /// Return a mutable reference to an instance of type `StructDefinitionIndex` published at the
-    /// address passed as argument. Abort execution if such an object does not exist or if a
-    /// reference has already been handed out.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., address_value -> ..., reference_value```
+
+    #[group = "variant"]
+    #[static_operands = "[variant_field_inst_idx]"]
+    #[description = r#"
+        Consume the reference to a generic struct at the top of the stack,
+        and provided that the struct is of the given variant, load an immutable
+        reference to the field of the variant.
+
+        Aborts execution if the operand is not of the given variant.
+    "#]
+    #[semantics = r#"
+        stack >> struct_ref
+        if struct_ref is variant_field.variant
+            stack << &(*struct_ref).field(variant_field.field_index)
+        else
+            error
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == &mut struct_ty
+        ty_stack << &mut field_ty
+    "#]
+    ImmBorrowVariantFieldGeneric(VariantFieldInstantiationIndex),
+
+    #[group = "global"]
+    #[static_operands = "[struct_def_idx]"]
+    #[description = r#"
+        Return a mutable reference to an instance of the specified type under the address passed as argument.
+
+        Abort execution if such an object does not exist.
+    "#]
+    #[semantics = r#"
+        stack >> addr
+
+        if global_state[addr] contains struct_type
+            stack << &mut global_state[addr][struct_type]
+        else
+            error
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == address
+        assert struct_ty has key
+        ty_stack << &mut struct_ty
+    "#]
     MutBorrowGlobal(StructDefinitionIndex),
+    #[group = "global"]
+    #[static_operands = "[struct_inst_idx]"]
+    #[description = "Generic version of `mut_borrow_global`."]
+    #[semantics = "See `mut_borrow_global`."]
+    #[runtime_check_epilogue = "See `mut_borrow_global`."]
+    #[gas_type_creation_tier_0 = "resource_ty"]
     MutBorrowGlobalGeneric(StructDefInstantiationIndex),
-    /// Return an immutable reference to an instance of type `StructDefinitionIndex` published at
-    /// the address passed as argument. Abort execution if such an object does not exist or if a
-    /// reference has already been handed out.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., address_value -> ..., reference_value```
+
+    #[group = "global"]
+    #[static_operands = "[struct_def_idx]"]
+    #[description = r#"
+        Return an immutable reference to an instance of the specified type under the address passed as argument.
+
+        Abort execution if such an object does not exist.
+    "#]
+    #[semantics = r#"
+        stack >> addr
+
+        if global_state[addr] contains struct_type
+            stack << &global_state[addr][struct_type]
+        else
+            error
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == address
+        assert struct_ty has key
+        ty_stack << &struct_ty
+    "#]
     ImmBorrowGlobal(StructDefinitionIndex),
+    #[group = "global"]
+    #[static_operands = "[struct_inst_idx]"]
+    #[description = "Generic version of `imm_borrow_global`."]
+    #[semantics = "See `imm_borrow_global`."]
+    #[runtime_check_epilogue = "See `imm_borrow_global`."]
+    #[gas_type_creation_tier_0 = "resource_ty"]
     ImmBorrowGlobalGeneric(StructDefInstantiationIndex),
-    /// Add the 2 u64 at the top of the stack and pushes the result on the stack.
-    /// The operation aborts the transaction in case of overflow.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., u64_value```
+
+    #[group = "arithmetic"]
+    #[description = r#"
+        Add the two integer values at the top of the stack and push the result on the stack.
+
+        This operation aborts the transaction in case of overflow.
+    "#]
+    #[semantics = r#"
+        stack >> rhs
+        stack >> lhs
+        if lhs + rhs > int_ty::max
+            arithmetic error
+        else
+            stack << (lhs + rhs)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert left_ty == right_ty
+        ty_stack << right_ty
+    "#]
     Add,
-    /// Subtract the 2 u64 at the top of the stack and pushes the result on the stack.
-    /// The operation aborts the transaction in case of underflow.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., u64_value```
+
+    #[group = "arithmetic"]
+    #[description = r#"
+        Subtract the two integer values at the top of the stack and push the result on the stack.
+
+        This operation aborts the transaction in case of underflow.
+    "#]
+    #[semantics = r#"
+        stack >> rhs
+        stack >> lhs
+        if lhs < rhs
+            arithmetic error
+        else
+            stack << (lhs - rhs)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert left_ty == right_ty
+        ty_stack << right_ty
+    "#]
     Sub,
-    /// Multiply the 2 u64 at the top of the stack and pushes the result on the stack.
-    /// The operation aborts the transaction in case of overflow.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., u64_value```
+
+    #[group = "arithmetic"]
+    #[description = r#"
+        Multiply the two integer values at the top of the stack and push the result on the stack.
+
+        This operation aborts the transaction in case of overflow.
+    "#]
+    #[semantics = r#"
+        stack >> rhs
+        stack >> lhs
+        if lhs * rhs > int_ty::max
+            arithmetic error
+        else
+            stack << (lhs * rhs)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert left_ty == right_ty
+        ty_stack << right_ty
+    "#]
     Mul,
-    /// Perform a modulo operation on the 2 u64 at the top of the stack and pushes the
-    /// result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., u64_value```
+
+    #[group = "arithmetic"]
+    #[description = r#"
+        Perform a modulo operation on the two integer values at the top of the stack and push the result on the stack.
+
+        This operation aborts the transaction in case the right hand side is zero.
+    "#]
+    #[semantics = r#"
+        stack >> rhs
+        stack >> lhs
+        if rhs == 0
+            arithmetic error
+        else
+            stack << (lhs % rhs)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert left_ty == right_ty
+        ty_stack << right_ty
+    "#]
     Mod,
-    /// Divide the 2 u64 at the top of the stack and pushes the result on the stack.
-    /// The operation aborts the transaction in case of "divide by 0".
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., u64_value```
+
+    #[group = "arithmetic"]
+    #[description = r#"
+        Divide the two integer values at the top of the stack and push the result on the stack.
+
+        This operation aborts the transaction in case the right hand side is zero.
+    "#]
+    #[semantics = r#"
+        stack >> rhs
+        stack >> lhs
+        if rhs == 0
+            arithmetic error
+        else
+            stack << (lhs / rhs)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert left_ty == right_ty
+        ty_stack << right_ty
+    "#]
     Div,
-    /// Bitwise OR the 2 u64 at the top of the stack and pushes the result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., u64_value```
+
+    #[group = "bitwise"]
+    #[description = r#"
+        Perform a bitwise OR operation on the two integer values at the top of the stack
+        and push the result on the stack.
+
+        The operands can be of any (but the same) primitive integer type.
+    "#]
+    #[semantics = r#"
+        stack >> rhs
+        stack >> lhs
+        stack << lhs | rhs
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert left_ty == right_ty
+        ty_stack << right_ty
+    "#]
     BitOr,
-    /// Bitwise AND the 2 u64 at the top of the stack and pushes the result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., u64_value```
+
+    #[group = "bitwise"]
+    #[description = r#"
+        Perform a bitwise AND operation on the two integer values at the top of the stack
+        and push the result on the stack.
+
+        The operands can be of any (but the same) primitive integer type.
+    "#]
+    #[semantics = r#"
+        stack >> rhs
+        stack >> lhs
+        stack << lhs & rhs
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert left_ty == right_ty
+        ty_stack << right_ty
+    "#]
     BitAnd,
-    /// Bitwise XOR the 2 u64 at the top of the stack and pushes the result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., u64_value```
+
+    // TODO: Rename the enum variant to BitXor for consistency.
+    #[name = "bit_xor"]
+    #[group = "bitwise"]
+    #[description = r#"
+        Perform a bitwise XOR operation on the two integer values at the top of the stack
+        and push the result on the stack.
+
+        The operands can be of any (but the same) primitive integer type.
+    "#]
+    #[semantics = r#"
+        stack >> rhs
+        stack >> lhs
+        stack << lhs ^ rhs
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert left_ty == right_ty
+        ty_stack << right_ty
+    "#]
     Xor,
-    /// Logical OR the 2 bool at the top of the stack and pushes the result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., bool_value(1), bool_value(2) -> ..., bool_value```
+
+    #[group = "boolean"]
+    #[description = r#"
+        Perform a boolean OR operation on the two bool values at the top of the stack
+        and push the result on the stack.
+    "#]
+    #[semantics = r#"
+        stack >> rhs
+        stack >> lhs
+        stack << lhs || rhs
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert left_ty == right_ty
+        ty_stack << right_ty
+    "#]
     Or,
-    /// Logical AND the 2 bool at the top of the stack and pushes the result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., bool_value(1), bool_value(2) -> ..., bool_value```
+
+    #[group = "boolean"]
+    #[description = r#"
+        Perform a boolean AND operation on the two bool values at the top of the stack
+        and push the result on the stack.
+    "#]
+    #[semantics = r#"
+        stack >> rhs
+        stack >> lhs
+        stack << lhs && rhs
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert left_ty == right_ty
+        ty_stack << right_ty
+    "#]
     And,
-    /// Logical NOT the bool at the top of the stack and pushes the result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., bool_value -> ..., bool_value```
+
+    #[group = "boolean"]
+    #[description = r#"
+        Invert the bool value at the top of the stack and push the result on the stack.
+    "#]
+    #[semantics = r#"
+        stack >> bool_val
+        stack << (not bool_val)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == bool
+        ty_stack << bool
+    "#]
     Not,
-    /// Compare for equality the 2 value at the top of the stack and pushes the
-    /// result on the stack.
-    /// The values on the stack must have `Drop` as they will be consumed and destroyed.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., value(1), value(2) -> ..., bool_value```
+
+    #[group = "comparison"]
+    #[description = r#"
+        Compare for equality the two values at the top of the stack and push the result on the stack.
+
+        The values must have the `drop` ability as they will be consumed and destroyed.
+    "#]
+    #[semantics = r#"
+        stack >> rhs
+        stack >> lhs
+        stack << (lhs == rhs)
+
+        Note that equality is only defined for
+            - Simple primitive types: u8, u16, u32, u64, u128, u256, bool, address
+            - vector<T> where equality is defined for T
+            - &T (or &mut T) where equality is defined for T
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert right_ty == left_ty
+        assert right_ty has drop
+        ty_stack << bool
+    "#]
     Eq,
-    /// Compare for inequality the 2 value at the top of the stack and pushes the
-    /// result on the stack.
-    /// The values on the stack must have `Drop` as they will be consumed and destroyed.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., value(1), value(2) -> ..., bool_value```
+
+    #[group = "comparison"]
+    #[description = r#"
+        Similar to `eq`, but with the result being inverted.
+    "#]
+    #[semantics = r#"
+        stack >> rhs
+        stack >> lhs
+        stack << (lhs != rhs)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert right_ty == left_ty
+        assert right_ty has drop
+        ty_stack << bool
+    "#]
     Neq,
-    /// Perform a "less than" operation of the 2 u64 at the top of the stack and pushes the
-    /// result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., bool_value```
+
+    #[group = "comparison"]
+    #[description = r#"
+        Perform a "less than" operation of the two integer values at the top of the stack
+        and push the boolean result on the stack.
+
+        The operands can be of any (but the same) primitive integer type.
+    "#]
+    #[semantics = r#"
+        stack >> (rhs: int_ty)
+        stack >> (lhs: int_ty)
+        stack << (lhs < rhs)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert right_ty == left_ty
+        assert right_ty has drop
+        ty_stack << bool
+    "#]
     Lt,
-    /// Perform a "greater than" operation of the 2 u64 at the top of the stack and pushes the
-    /// result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., bool_value```
+
+    #[group = "comparison"]
+    #[description = r#"
+        Perform a "greater than" operation of the two integer values at the top of the stack
+        and push the boolean result on the stack.
+
+        The operands can be of any (but the same) primitive integer type.
+    "#]
+    #[semantics = r#"
+        stack >> (rhs: int_ty)
+        stack >> (lhs: int_ty)
+        stack << (lhs > rhs)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert right_ty == left_ty
+        assert right_ty has drop
+        ty_stack << bool
+    "#]
     Gt,
-    /// Perform a "less than or equal" operation of the 2 u64 at the top of the stack and pushes
-    /// the result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., bool_value```
+
+    #[group = "comparison"]
+    #[description = r#"
+        Perform a "less than or equal to" operation of the two integer values at the top of the stack
+        and push the boolean result on the stack.
+
+        The operands can be of any (but the same) primitive integer type.
+    "#]
+    #[semantics = r#"
+        stack >> (rhs: int_ty)
+        stack >> (lhs: int_ty)
+        stack << (lhs <= rhs)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert right_ty == left_ty
+        assert right_ty has drop
+        ty_stack << bool
+    "#]
     Le,
-    /// Perform a "greater than or equal" than operation of the 2 u64 at the top of the stack
-    /// and pushes the result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., bool_value```
+
+    #[group = "comparison"]
+    #[description = r#"
+        Perform a "greater than or equal to" operation of the two integer values at the top of the stack
+        and push the boolean result on the stack.
+
+        The operands can be of any (but the same) primitive integer type.
+    "#]
+    #[semantics = r#"
+        stack >> (rhs: int_ty)
+        stack >> (lhs: int_ty)
+        stack << (lhs >= rhs)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        assert right_ty == left_ty
+        assert right_ty has drop
+        ty_stack << bool
+    "#]
     Ge,
-    /// Abort execution with errorcode
-    ///
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., errorcode -> ...```
+
+    #[group = "control_flow"]
+    #[description = r#"
+        Abort the transaction with an error code.
+    "#]
+    #[semantics = r#"
+        stack >> (error_code: u64)
+        abort transaction with error_code
+    "#]
+    #[runtime_check_prologue = "ty_stack >> _"]
     Abort,
-    /// No operation.
-    ///
-    /// Stack transition: none
+
+    #[group = "control_flow"]
+    #[description = r#"
+        A "no operation" -- an instruction that does not perform any meaningful operation.
+        It can be however, useful as a placeholder in certain cases.
+    "#]
+    #[semantics = "current_frame.pc += 1"]
     Nop,
-    /// Returns whether or not a given address has an object of type StructDefinitionIndex
-    /// published already
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., address_value -> ..., bool_value```
+
+    #[group = "global"]
+    #[static_operands = "[struct_def_idx]"]
+    #[description = "Check whether or not a given address in the global storage has an object of the specified type already."]
+    #[semantics = r#"
+        stack >> addr
+        stack << (global_state[addr] contains struct_type)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == address
+        ty_stack << bool
+    "#]
     Exists(StructDefinitionIndex),
+    #[group = "global"]
+    #[static_operands = "[struct_inst_idx]"]
+    #[description = "Generic version of `Exists`"]
+    #[semantics = "See `Exists`."]
+    #[runtime_check_epilogue = "See `Exists`."]
+    #[gas_type_creation_tier_0 = "resource_ty"]
     ExistsGeneric(StructDefInstantiationIndex),
-    /// Move the instance of type StructDefinitionIndex, at the address at the top of the stack.
-    /// Abort execution if such an object does not exist.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., address_value -> ..., value```
+
+    #[group = "global"]
+    #[static_operands = "[struct_def_idx]"]
+    #[description = r#"
+        Move the value of the specified type under the address in the global storage onto the top of the stack.
+
+        Abort execution if such an value does not exist.
+    "#]
+    #[semantics = r#"
+        stack >> addr
+
+        if global_state[addr] contains struct_type
+            stack << global_state[addr][struct_type]
+            delete global_state[addr][struct_type]
+        else
+            error
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == address
+        assert struct_ty has key
+        ty_stack << struct_ty
+    "#]
     MoveFrom(StructDefinitionIndex),
+    #[group = "global"]
+    #[static_operands = "[struct_inst_idx]"]
+    #[description = "Generic version of `MoveFrom`"]
+    #[semantics = "See `MoveFrom`."]
+    #[runtime_check_epilogue = "See `MoveFrom`."]
+    #[gas_type_creation_tier_0 = "resource_ty"]
     MoveFromGeneric(StructDefInstantiationIndex),
-    /// Move the instance at the top of the stack to the address of the `Signer` on the stack below
-    /// it
-    /// Abort execution if an object of type StructDefinitionIndex already exists in address.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., signer_value, value -> ...```
+
+    #[group = "global"]
+    #[static_operands = "[struct_def_idx]"]
+    #[description = r#"
+        Move the value at the top of the stack into the global storage,
+        under the address of the `signer` on the stack below it.
+
+        Abort execution if an object of the same type already exists under that address.
+    "#]
+    #[semantics = r#"
+        stack >> struct_val
+        stack >> &signer
+
+        if global_state[signer.addr] contains struct_type
+            error
+        else
+            global_state[signer.addr][struct_type] = struct_val
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty1
+        ty_stack >> ty2
+        assert ty2 == signer
+        assert ty1 == struct_ty
+        assert struct_ty has key
+    "#]
     MoveTo(StructDefinitionIndex),
+    #[group = "global"]
+    #[static_operands = "[struct_inst_idx]"]
+    #[description = "Generic version of `MoveTo`"]
+    #[semantics = "See `MoveTo`."]
+    #[runtime_check_epilogue = "See `MoveTo`."]
+    #[gas_type_creation_tier_0 = "resource_ty"]
     MoveToGeneric(StructDefInstantiationIndex),
-    /// Shift the (second top value) left (top value) bits and pushes the result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., u64_value```
+
+    #[group = "bitwise"]
+    #[description = r#"
+        Shift the (second top value) right (top value) bits and pushes the result on the stack.
+
+        The number of bits shifted must be less than the number of bits in the integer value being shifted,
+        or the transaction will be aborted with an arithmetic error.
+
+        The number being shifted can be of any primitive integer type, but the number of bits
+        shifted must be u64.
+    "#]
+    #[semantics = r#"
+        stack >> (rhs: u8)
+        stack >> (lhs: int_ty)
+        if rhs >= num_bits_in(int_ty)
+            arithmetic error
+        else
+            stack << (lhs __shift_left__ rhs)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        ty_stack << left_ty
+    "#]
     Shl,
-    /// Shift the (second top value) right (top value) bits and pushes the result on the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., u64_value(1), u64_value(2) -> ..., u64_value```
+
+    #[group = "bitwise"]
+    #[description = r#"
+        Shift the (second top value) left (top value) bits and pushes the result on the stack.
+
+        The number of bits shifted must be less than the number of bits in the integer value being shifted,
+        or the transaction will be aborted with an arithmetic error.
+
+        The number being shifted can be of any primitive integer type, but the number of bits
+        shifted must be u64.
+    "#]
+    #[semantics = r#"
+        stack >> (rhs: u8)
+        stack >> (lhs: int_ty)
+        if rhs >= num_bits_in(int_ty)
+            arithmetic error
+        else
+            stack << (lhs __shift_right__ rhs)
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> right_ty
+        ty_stack >> left_ty
+        ty_stack << left_ty
+    "#]
     Shr,
-    /// Create a vector by packing a statically known number of elements from the stack. Abort the
-    /// execution if there are not enough number of elements on the stack to pack from or they don't
-    /// have the same type identified by the SignatureIndex.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., e1, e2, ..., eN -> ..., vec[e1, e2, ..., eN]```
+
+    #[group = "vector"]
+    #[description = r#"
+        Create a vector by packing a statically known number of elements from the stack.
+
+        Abort the execution if there are not enough number of elements on the stack
+        to pack from or they do not have the same type identified by the `elem_ty_idx`.
+    "#]
+    #[static_operands = "[elem_ty_idx] [num_elements]"]
+    #[semantics = r#"
+        stack >> elem_n-1
+        ..
+        stack >> elem_0
+        stack << vector[elem_0, .., elem_n-1]
+    "#]
+    #[runtime_check_epilogue = r#"
+        elem_ty = instantiate elem_ty
+        for i in 1..=n:
+            ty_stack >> ty
+            assert ty == elem_ty
+        ty_stack << vector<elem_ty>
+    "#]
+    #[gas_type_creation_tier_0 = "elem_ty"]
     VecPack(SignatureIndex, u64),
-    /// Return the length of the vector,
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., vector_reference -> ..., u64_value```
+
+    #[group = "vector"]
+    #[description = "Get the length of a vector."]
+    #[static_operands = "[elem_ty_idx]"]
+    #[semantics = r#"
+        stack >> vec_ref
+        stack << (*vec_ref).len
+    "#]
+    #[runtime_check_epilogue = r#"
+        elem_ty = instantiate elem_ty
+        ty_stack >> ty
+        assert ty == &elem_ty
+        ty_stack << u64
+    "#]
+    #[gas_type_creation_tier_0 = "elem_ty"]
     VecLen(SignatureIndex),
-    /// Acquire an immutable reference to the element at a given index of the vector. Abort the
-    /// execution if the index is out of bounds.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., vector_reference, u64_value -> .., element_reference```
+
+    #[group = "vector"]
+    #[description = r#"
+        Acquire an immutable reference to the element at a given index of the vector.
+        Abort the execution if the index is out of bounds.
+    "#]
+    #[static_operands = "[elem_ty_idx]"]
+    #[semantics = r#"
+        stack >> i
+        stack >> vec_ref
+        stack << &((*vec_ref)[i])
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> idx_ty
+        assert idx_ty == u64
+        ty_stack >> ref_ty
+        assert ref_ty == &vector<elem_ty>
+        ty_stack << &elem_ty
+    "#]
+    #[gas_type_creation_tier_0 = "elem_ty"]
     VecImmBorrow(SignatureIndex),
-    /// Acquire a mutable reference to the element at a given index of the vector. Abort the
-    /// execution if the index is out of bounds.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., vector_reference, u64_value -> .., element_reference```
+
+    #[group = "vector"]
+    #[description = r#"
+        Acquire a mutable reference to the element at a given index of the vector.
+        Abort the execution if the index is out of bounds.
+    "#]
+    #[static_operands = "[elem_ty_idx]"]
+    #[semantics = r#"
+        stack >> i
+        stack >> vec_ref
+        stack << &mut ((*vec_ref)[i])
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> idx_ty
+        assert idx_ty == u64
+        ty_stack >> ref_ty
+        assert ref_ty == &mut vector<elem_ty>
+        ty_stack << &mut elem_ty
+    "#]
+    #[gas_type_creation_tier_0 = "elem_ty"]
     VecMutBorrow(SignatureIndex),
-    /// Add an element to the end of the vector.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., vector_reference, element -> ...```
+
+    #[group = "vector"]
+    #[description = "Add an element to the end of the vector."]
+    #[static_operands = "[elem_ty_idx]"]
+    #[semantics = r#"
+        stack >> val
+        stack >> vec_ref
+        (*vec_ref) << val
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> val_ty
+        assert val_ty == elem_ty
+        ty_stack >> ref_ty
+        assert ref_ty == &mut vector<elem_ty>
+    "#]
     VecPushBack(SignatureIndex),
-    /// Pop an element from the end of vector. Aborts if the vector is empty.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., vector_reference -> ..., element```
+
+    #[group = "vector"]
+    #[description = r#"
+        Pop an element from the end of vector.
+        Aborts if the vector is empty.
+    "#]
+    #[static_operands = "[elem_ty_idx]"]
+    #[semantics = r#"
+        stack >> vec_ref
+        (*vec_ref) >> val
+        stack << val
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ref_ty
+        assert ref_ty == &mut vector<elem_ty>
+        ty_stack << val_ty
+    "#]
     VecPopBack(SignatureIndex),
-    /// Destroy the vector and unpack a statically known number of elements onto the stack. Aborts
-    /// if the vector does not have a length N.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., vec[e1, e2, ..., eN] -> ..., e1, e2, ..., eN```
+
+    #[group = "vector"]
+    #[description = r#"
+        Destroy the vector and unpack a statically known number of elements onto the stack.
+        Abort if the vector does not have a length `n`.
+    "#]
+    #[static_operands = "[elem_ty_idx] [num_elements]"]
+    #[semantics = r#"
+        stack >> vector[elem_0, ..., elem_n-1]
+        stack << elem_0
+        ...
+        stack << elem_n
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty
+        assert ty == vector<elem_ty>
+        ty_stack << [elem_ty]*n
+    "#]
     VecUnpack(SignatureIndex, u64),
-    /// Swaps the elements at two indices in the vector. Abort the execution if any of the indice
-    /// is out of bounds.
-    ///
-    /// ```..., vector_reference, u64_value(1), u64_value(2) -> ...```
+
+    #[group = "vector"]
+    #[description = r#"
+        Swaps the elements at two indices in the vector.
+        Abort the execution if any of the indices are out of bounds.
+    "#]
+    #[static_operands = "[elem_ty_idx]"]
+    #[semantics = r#"
+        stack >> j
+        stack >> i
+        stack >> vec_ref
+        (*vec_ref)[i], (*vec_ref)[j] = (*vec_ref)[j], (*vec_ref)[i]
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> ty1
+        ty_stack >> ty2
+        ty_stack >> ty3
+        assert ty1 == u64
+        assert ty2 == u64
+        assert ty3 == &vector<elem_ty>
+    "#]
     VecSwap(SignatureIndex),
-    /// Push a U16 constant onto the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., u16_value```
+
+    #[group = "closure"]
+    #[description = r#"
+        `PackClosure(fun, mask)` creates a closure for a given function handle as controlled by
+        the given `mask`. `mask` is a u64 bitset which describes which of the arguments
+        of `fun` are captured by the closure.
+
+        If the function `fun` has type `|t1..tn|r`, then the following holds:
+
+        - If `m` are the number of bits set in the mask, then `m <= n`, and the stack is
+          `[vm..v1] + stack`, and if `i` is the `j`th bit set in the mask,
+           then `vj` has type `ti`.
+        - type ti is not a reference.
+
+        Thus the values on the stack must match the types in the function
+        signature which have the bit to be captured set in the mask.
+
+        The type of the resulting value on the stack is derived from the types `|t1..tn|`
+        for which the bit is not set, which build the arguments of a function type
+        with `fun`'s result types.
+
+        The `abilities` of this function type are derived from the inputs as follows.
+        First, take the intersection of the abilities of all captured arguments
+        with type `t1..tn`. Then intersect this with the abilities derived from the
+        function: a function handle has `drop` and `copy`, never has `key`, and only
+        `store` if the underlying function is public, and therefore cannot change
+        its signature.
+
+        Notice that an implementation can derive the types of the captured arguments
+        at runtime from a closure value as long as the closure value stores the function
+        handle (or a derived form of it) and the mask, where the handle allows to lookup the
+        function's type at runtime. Then the same procedure as outlined above can be used.
+    "#]
+    #[static_operands = "[fun, mask]"]
+    #[semantics = ""]
+    #[runtime_check_epilogue = ""]
+    #[gas_type_creation_tier_0 = "closure_ty"]
+    PackClosure(FunctionHandleIndex, ClosureMask),
+
+    #[group = "closure"]
+    #[static_operands = "[fun, mask]"]
+    #[semantics = ""]
+    #[runtime_check_epilogue = ""]
+    #[description = r#"
+        Same as `PackClosure` but for the instantiation of a generic function.
+
+        Notice that an uninstantiated generic function cannot be used to create a closure.
+    "#]
+    #[gas_type_creation_tier_0 = "closure_ty"]
+    PackClosureGeneric(FunctionInstantiationIndex, ClosureMask),
+
+    #[group = "closure"]
+    #[description = r#"
+        `CallClosure(|t1..tn|r has a)` evalutes a closure of the given function type,
+        taking the captured arguments and mixing in the provided ones on the stack.
+
+        On top of the stack is the closure being evaluated, underneath the arguments:
+        `[c,vn,..,v1] + stack`. The type of the closure must match the type specified in
+        the instruction, with abilities `a` a subset of the abilities of the closure value.
+        A value `vi` on the stack must have type `ti`.
+
+        Notice that the type as part of the closure instruction is redundant for
+        execution semantics. Since the closure is expected to be on top of the stack,
+        it can decode the arguments underneath without type information.
+        However, the type is required to do static bytecode verification.
+
+        The semantics of this instruction can be characterized by the following equation:
+
+        ```
+          CallClosure(PackClosure(f, mask, c1..cn), a1..am) ==
+             f(mask.compose(c1..cn, a1..am))
+        ```
+    "#]
+    #[static_operands = "[]"]
+    #[semantics = ""]
+    #[runtime_check_epilogue = ""]
+    #[gas_type_creation_tier_0 = "closure_ty"]
+    CallClosure(SignatureIndex),
+
+    #[group = "stack_and_local"]
+    #[description = "Push a u16 constant onto the stack."]
+    #[static_operands = "[u16_value]"]
+    #[semantics = "stack << u16_value"]
+    #[runtime_check_epilogue = "ty_stack << u16"]
     LdU16(u16),
-    /// Push a U32 constant onto the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., u32_value```
+
+    #[group = "stack_and_local"]
+    #[description = "Push a u32 constant onto the stack."]
+    #[static_operands = "[u32_value]"]
+    #[semantics = "stack << u32_value"]
+    #[runtime_check_epilogue = "ty_stack << u32"]
     LdU32(u32),
-    /// Push a U256 constant onto the stack.
-    ///
-    /// Stack transition:
-    ///
-    /// ```... -> ..., u256_value```
+
+    #[group = "stack_and_local"]
+    #[description = "Push a u256 constant onto the stack."]
+    #[static_operands = "[u256_value]"]
+    #[semantics = "stack << u256_value"]
+    #[runtime_check_epilogue = "ty_stack << u256"]
     LdU256(move_core_types::u256::U256),
-    /// Convert the value at the top of the stack into u16.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., integer_value -> ..., u16_value```
+
+    #[group = "casting"]
+    #[description = r#"
+        Convert the integer value at the top of the stack into a u16.
+        An arithmetic error will be raised if the value cannot be represented as a u16.
+    "#]
+    #[semantics = r#"
+        stack >> int_val
+        if int_val > u16::MAX:
+            arithmetic error
+        else:
+            stack << int_val as u16
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> _
+        ty_stack << u16
+    "#]
     CastU16,
-    /// Convert the value at the top of the stack into u32.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., integer_value -> ..., u32_value```
+
+    #[group = "casting"]
+    #[description = r#"
+        Convert the integer value at the top of the stack into a u32.
+        An arithmetic error will be raised if the value cannot be represented as a u32.
+    "#]
+    #[semantics = r#"
+        stack >> int_val
+        if int_val > u32::MAX:
+            arithmetic error
+        else:
+            stack << int_val as u32
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> _
+        ty_stack << u32
+    "#]
     CastU32,
-    /// Convert the value at the top of the stack into u256.
-    ///
-    /// Stack transition:
-    ///
-    /// ```..., integer_value -> ..., u256_value```
+
+    #[group = "casting"]
+    #[description = r#"
+        Convert the integer value at the top of the stack into a u256.
+    "#]
+    #[semantics = r#"
+        stack >> int_val
+        stack << int_val as u256
+    "#]
+    #[runtime_check_epilogue = r#"
+        ty_stack >> _
+        ty_stack << u256
+    "#]
     CastU256,
 }
 
@@ -1817,8 +2813,19 @@ impl ::std::fmt::Debug for Bytecode {
             Bytecode::CallGeneric(a) => write!(f, "CallGeneric({})", a),
             Bytecode::Pack(a) => write!(f, "Pack({})", a),
             Bytecode::PackGeneric(a) => write!(f, "PackGeneric({})", a),
+            Bytecode::PackVariant(a) => write!(f, "PackVariant({})", a),
+            Bytecode::TestVariant(a) => write!(f, "TestVariant({})", a),
+            Bytecode::PackVariantGeneric(a) => write!(f, "PackVariantGeneric({})", a),
+            Bytecode::TestVariantGeneric(a) => write!(f, "TestVariantGeneric({})", a),
             Bytecode::Unpack(a) => write!(f, "Unpack({})", a),
             Bytecode::UnpackGeneric(a) => write!(f, "UnpackGeneric({})", a),
+            Bytecode::UnpackVariant(a) => write!(f, "UnpackVariant({})", a),
+            Bytecode::UnpackVariantGeneric(a) => write!(f, "UnpackVariantGeneric({})", a),
+            Bytecode::PackClosureGeneric(a, mask) => {
+                write!(f, "PackClosureGeneric({}, {})", a, mask)
+            },
+            Bytecode::PackClosure(a, mask) => write!(f, "PackClosure({}, {})", a, mask),
+            Bytecode::CallClosure(a) => write!(f, "CallClosure({})", a),
             Bytecode::ReadRef => write!(f, "ReadRef"),
             Bytecode::WriteRef => write!(f, "WriteRef"),
             Bytecode::FreezeRef => write!(f, "FreezeRef"),
@@ -1826,8 +2833,16 @@ impl ::std::fmt::Debug for Bytecode {
             Bytecode::ImmBorrowLoc(a) => write!(f, "ImmBorrowLoc({})", a),
             Bytecode::MutBorrowField(a) => write!(f, "MutBorrowField({:?})", a),
             Bytecode::MutBorrowFieldGeneric(a) => write!(f, "MutBorrowFieldGeneric({:?})", a),
+            Bytecode::MutBorrowVariantField(a) => write!(f, "MutBorrowVariantField({:?})", a),
+            Bytecode::MutBorrowVariantFieldGeneric(a) => {
+                write!(f, "MutBorrowVariantFieldGeneric({:?})", a)
+            },
             Bytecode::ImmBorrowField(a) => write!(f, "ImmBorrowField({:?})", a),
             Bytecode::ImmBorrowFieldGeneric(a) => write!(f, "ImmBorrowFieldGeneric({:?})", a),
+            Bytecode::ImmBorrowVariantField(a) => write!(f, "ImmBorrowVariantField({:?})", a),
+            Bytecode::ImmBorrowVariantFieldGeneric(a) => {
+                write!(f, "ImmBorrowVariantFieldGeneric({:?})", a)
+            },
             Bytecode::MutBorrowGlobal(a) => write!(f, "MutBorrowGlobal({:?})", a),
             Bytecode::MutBorrowGlobalGeneric(a) => write!(f, "MutBorrowGlobalGeneric({:?})", a),
             Bytecode::ImmBorrowGlobal(a) => write!(f, "ImmBorrowGlobal({:?})", a),
@@ -1939,7 +2954,10 @@ impl Bytecode {
 /// A CompiledScript defines the constant pools (string, address, signatures, etc.), the handle
 /// tables (external code references) and it has a `main` definition.
 #[derive(Clone, Default, Eq, PartialEq, Debug)]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct CompiledScript {
     /// Version number found during deserialization
     pub version: u32,
@@ -1990,7 +3008,10 @@ impl CompiledScript {
 ///
 /// A module is published as a single entry and it is retrieved as a single blob.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub struct CompiledModule {
     /// Version number found during deserialization
     pub version: u32,
@@ -2030,6 +3051,12 @@ pub struct CompiledModule {
     pub struct_defs: Vec<StructDefinition>,
     /// Function defined in this module.
     pub function_defs: Vec<FunctionDefinition>,
+
+    /// Since bytecode version 7: variant related handle tables
+    pub struct_variant_handles: Vec<StructVariantHandle>,
+    pub struct_variant_instantiations: Vec<StructVariantInstantiation>,
+    pub variant_field_handles: Vec<VariantFieldHandle>,
+    pub variant_field_instantiations: Vec<VariantFieldInstantiation>,
 }
 
 // Need a custom implementation of Arbitrary because as of proptest-derive 0.1.1, the derivation
@@ -2140,6 +3167,10 @@ impl Arbitrary for CompiledModule {
                         metadata: vec![],
                         struct_defs,
                         function_defs,
+                        struct_variant_handles: vec![],
+                        struct_variant_instantiations: vec![],
+                        variant_field_handles: vec![],
+                        variant_field_instantiations: vec![],
                     }
                 },
             )
@@ -2148,6 +3179,15 @@ impl Arbitrary for CompiledModule {
 }
 
 impl CompiledModule {
+    /// Sets the version of this module to VERSION_DEFAULT.The default initial value
+    /// is VERSION_MAX.
+    pub fn set_default_version(self) -> Self {
+        Self {
+            version: VERSION_DEFAULT,
+            ..self
+        }
+    }
+
     /// Returns the count of a specific `IndexKind`
     pub fn kind_count(&self, kind: IndexKind) -> usize {
         debug_assert!(!matches!(
@@ -2155,6 +3195,7 @@ impl CompiledModule {
             IndexKind::LocalPool
                 | IndexKind::CodeDefinition
                 | IndexKind::FieldDefinition
+                | IndexKind::VariantDefinition
                 | IndexKind::TypeParameter
                 | IndexKind::MemberCount
         ));
@@ -2173,10 +3214,17 @@ impl CompiledModule {
             IndexKind::Identifier => self.identifiers.len(),
             IndexKind::AddressIdentifier => self.address_identifiers.len(),
             IndexKind::ConstantPool => self.constant_pool.len(),
+            // Since bytecode version 7
+            IndexKind::VariantFieldHandle => self.variant_field_handles.len(),
+            IndexKind::VariantFieldInstantiation => self.variant_field_instantiations.len(),
+            IndexKind::StructVariantHandle => self.struct_variant_handles.len(),
+            IndexKind::StructVariantInstantiation => self.struct_variant_instantiations.len(),
+
             // XXX these two don't seem to belong here
             other @ IndexKind::LocalPool
             | other @ IndexKind::CodeDefinition
             | other @ IndexKind::FieldDefinition
+            | other @ IndexKind::VariantDefinition
             | other @ IndexKind::TypeParameter
             | other @ IndexKind::MemberCount => unreachable!("invalid kind for count: {:?}", other),
         }
@@ -2194,9 +3242,17 @@ impl CompiledModule {
     pub fn self_id(&self) -> ModuleId {
         self.module_id_for_handle(self.self_handle())
     }
+
+    pub fn self_addr(&self) -> &AccountAddress {
+        self.address_identifier_at(self.self_handle().address)
+    }
+
+    pub fn self_name(&self) -> &IdentStr {
+        self.identifier_at(self.self_handle().name)
+    }
 }
 
-/// Return the simplest module that will pass the bounds checker
+/// Return the simplest empty module stored at 0x0 that will pass the bounds checker.
 pub fn empty_module() -> CompiledModule {
     CompiledModule {
         version: file_format_common::VERSION_MAX,
@@ -2219,6 +3275,10 @@ pub fn empty_module() -> CompiledModule {
         function_instantiations: vec![],
         field_instantiations: vec![],
         signatures: vec![Signature(vec![])],
+        struct_variant_handles: vec![],
+        struct_variant_instantiations: vec![],
+        variant_field_handles: vec![],
+        variant_field_instantiations: vec![],
     }
 }
 
@@ -2278,6 +3338,36 @@ pub fn basic_test_module() -> CompiledModule {
     m
 }
 
+/// Creates an empty compiled module with specified dependencies and friends. All
+/// modules (including itself) are assumed to be stored at 0x0.
+pub fn empty_module_with_dependencies_and_friends<'a>(
+    module_name: &'a str,
+    dependencies: impl IntoIterator<Item = &'a str>,
+    friends: impl IntoIterator<Item = &'a str>,
+) -> CompiledModule {
+    // Rename this empty module.
+    let mut module = empty_module();
+    module.identifiers[0] = Identifier::new(module_name).unwrap();
+
+    for name in dependencies {
+        module.identifiers.push(Identifier::new(name).unwrap());
+        module.module_handles.push(ModuleHandle {
+            // Empty module sets up this index to 0x0.
+            address: AddressIdentifierIndex(0),
+            name: IdentifierIndex((module.identifiers.len() - 1) as TableIndex),
+        });
+    }
+    for name in friends {
+        module.identifiers.push(Identifier::new(name).unwrap());
+        module.friend_decls.push(ModuleHandle {
+            // Empty module sets up this index to 0x0.
+            address: AddressIdentifierIndex(0),
+            name: IdentifierIndex((module.identifiers.len() - 1) as TableIndex),
+        });
+    }
+    module
+}
+
 /// Return a simple script that contains only a return in the main()
 pub fn empty_script() -> CompiledScript {
     CompiledScript {
@@ -2302,6 +3392,25 @@ pub fn empty_script() -> CompiledScript {
             code: vec![Bytecode::Ret],
         },
     }
+}
+
+/// Creates an empty compiled script with specified dependencies. All dependency
+/// modules are assumed to be stored at 0x0.
+pub fn empty_script_with_dependencies<'a>(
+    dependencies: impl IntoIterator<Item = &'a str>,
+) -> CompiledScript {
+    let mut script = empty_script();
+
+    script.address_identifiers.push(AccountAddress::ZERO);
+    for name in dependencies {
+        script.identifiers.push(Identifier::new(name).unwrap());
+        script.module_handles.push(ModuleHandle {
+            address: AddressIdentifierIndex(0),
+            name: IdentifierIndex((script.identifiers.len() - 1) as TableIndex),
+        });
+    }
+
+    script
 }
 
 pub fn basic_test_script() -> CompiledScript {

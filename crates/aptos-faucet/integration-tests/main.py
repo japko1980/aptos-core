@@ -4,13 +4,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-This script is how we orchestrate running a local testnet and then the faucet
+This script is how we orchestrate running a localnet and then the faucet
 integration tests against it.
 
 Example invocation:
   python3 main.py --local-testnet-network devnet
 
-This would run a local testnet built from the devnet release branch and then run the
+This would run a localnet built from the devnet release branch and then run the
 faucet integration tests against it.
 
 The script confirms that pre-existing conditions are suitable, e.g. checking that a
@@ -50,7 +50,7 @@ def parse_args():
         "--image-repo-with-project",
         default="aptoslabs",
         help=(
-            "What docker image repo (+ project) to use for the local testnet. "
+            "What docker image repo (+ project) to use for the localnet. "
             "By default we use Docker Hub: %(default)s (so, just aptoslabs for the "
             "project since Docker Hub is the implied default repo). If you want to "
             "specify a different repo, it might look like this: "
@@ -62,9 +62,14 @@ def parse_args():
         required=True,
         choices=VALID_NETWORK_OPTIONS,
         help=(
-            "What branch the Aptos CLI used for the local testnet should be built "
+            "What branch the Aptos CLI used for the localnet should be built "
             'from. If "custom", --tag must be set.'
         ),
+    )
+    parser.add_argument(
+        "--skip-node",
+        action="store_true",
+        help="Skip running the node. You must run it yourself and copy the mint key yourself.",
     )
     parser.add_argument(
         "--tag",
@@ -97,7 +102,9 @@ def main():
     else:
         logging.getLogger().setLevel(logging.INFO)
 
-    if platform.system() == "Darwin" and platform.processor().startswith("arm"):
+    # If we're on Mac and DOCKER_DEFAULT_PLATFORM is not already set, set it to
+    # linux/amd64 since we only publish images for that platform.
+    if platform.system().lower() == "darwin" and platform.processor().lower().startswith("arm"):
         if not os.environ.get("DOCKER_DEFAULT_PLATFORM"):
             os.environ["DOCKER_DEFAULT_PLATFORM"] = "linux/amd64"
             LOG.info(
@@ -112,20 +119,22 @@ def main():
     # something is listening at the expected port.
     check_redis_is_running()
 
-    # Run a node and wait for it to start up.
-    container_name = run_node(
-        network, args.image_repo_with_project, args.external_test_dir
-    )
-    wait_for_startup(container_name, args.base_startup_timeout)
+    if not args.skip_node:
+        # Run a node and wait for it to start up.
+        container_name = run_node(
+            network, args.image_repo_with_project, args.external_test_dir
+        )
+        wait_for_startup(container_name, args.base_startup_timeout)
 
-    # Copy the mint key from the node to where the integration tests expect it to be.
-    copy_mint_key(args.external_test_dir)
+        # Copy the mint key from the node to where the integration tests expect it to be.
+        copy_mint_key(args.external_test_dir)
 
     # Build and run the faucet integration tests.
     run_faucet_integration_tests()
 
-    # Stop the local testnet.
-    stop_node(container_name)
+    if not args.skip_node:
+        # Stop the localnet.
+        stop_node(container_name)
 
     return True
 

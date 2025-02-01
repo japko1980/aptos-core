@@ -11,8 +11,8 @@ module aptos_framework::reconfiguration {
     use aptos_framework::system_addresses;
     use aptos_framework::timestamp;
     use aptos_framework::chain_status;
+    use aptos_framework::reconfiguration_state;
     use aptos_framework::storage_gas;
-    use aptos_framework::transaction_fee;
 
     friend aptos_framework::aptos_governance;
     friend aptos_framework::block;
@@ -21,11 +21,21 @@ module aptos_framework::reconfiguration {
     friend aptos_framework::gas_schedule;
     friend aptos_framework::genesis;
     friend aptos_framework::version;
+    friend aptos_framework::reconfiguration_with_dkg;
 
+    #[event]
     /// Event that signals consensus to start a new epoch,
     /// with new configuration information. This is also called a
     /// "reconfiguration event"
     struct NewEpochEvent has drop, store {
+        epoch: u64,
+    }
+
+    #[event]
+    /// Event that signals consensus to start a new epoch,
+    /// with new configuration information. This is also called a
+    /// "reconfiguration event"
+    struct NewEpoch has drop, store {
         epoch: u64,
     }
 
@@ -118,19 +128,7 @@ module aptos_framework::reconfiguration {
             return
         };
 
-        // Reconfiguration "forces the block" to end, as mentioned above. Therefore, we must process the collected fees
-        // explicitly so that staking can distribute them.
-        //
-        // This also handles the case when a validator is removed due to the governance proposal. In particular, removing
-        // the validator causes a reconfiguration. We explicitly process fees, i.e. we drain aggregatable coin and populate
-        // the fees table, prior to calling `on_new_epoch()`. That call, in turn, distributes transaction fees for all active
-        // and pending_inactive validators, which include any validator that is to be removed.
-        if (features::collect_and_distribute_gas_fees()) {
-            // All transactions after reconfiguration are Retry. Therefore, when the next
-            // block starts and tries to assign/burn collected fees it will be just 0 and
-            // nothing will be assigned.
-            transaction_fee::process_collected_fees();
-        };
+        reconfiguration_state::on_reconfig_start();
 
         // Call stake to compute the new validator set and distribute rewards and transaction fees.
         stake::on_new_epoch();
@@ -143,12 +141,21 @@ module aptos_framework::reconfiguration {
         };
         config_ref.epoch = config_ref.epoch + 1;
 
+        if (std::features::module_event_migration_enabled()) {
+            event::emit(
+                NewEpoch {
+                    epoch: config_ref.epoch,
+                },
+            );
+        };
         event::emit_event<NewEpochEvent>(
             &mut config_ref.events,
             NewEpochEvent {
                 epoch: config_ref.epoch,
             },
         );
+
+        reconfiguration_state::on_reconfig_finish();
     }
 
     public fun last_reconfiguration_time(): u64 acquires Configuration {
@@ -166,6 +173,13 @@ module aptos_framework::reconfiguration {
         assert!(config_ref.epoch == 0 && config_ref.last_reconfiguration_time == 0, error::invalid_state(ECONFIGURATION));
         config_ref.epoch = 1;
 
+        if (std::features::module_event_migration_enabled()) {
+            event::emit(
+                NewEpoch {
+                    epoch: config_ref.epoch,
+                },
+            );
+        };
         event::emit_event<NewEpochEvent>(
             &mut config_ref.events,
             NewEpochEvent {

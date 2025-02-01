@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use aptos_metrics_core::{
-    exponential_buckets, register_histogram, register_histogram_vec, register_int_counter,
-    register_int_counter_vec, Histogram, HistogramVec, IntCounter, IntCounterVec,
+    exponential_buckets, register_avg_counter_vec, register_histogram, register_histogram_vec,
+    register_int_counter, register_int_counter_vec, register_int_gauge, Histogram, HistogramVec,
+    IntCounter, IntCounterVec, IntGauge,
 };
+use aptos_mvhashmap::BlockStateStats;
 use aptos_types::fee_statement::FeeStatement;
 use once_cell::sync::Lazy;
 
@@ -46,6 +48,18 @@ fn output_buckets() -> std::vec::Vec<f64> {
     )
     .unwrap()
 }
+
+pub static BLOCK_EXECUTOR_INNER_EXECUTE_BLOCK: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        // metric name
+        "aptos_executor_block_executor_inner_execute_block_seconds",
+        // metric description
+        "The time spent in the most-inner part of executing a block of transactions, \
+        i.e. for BlockSTM that is how long parallel or sequential execution took.",
+        exponential_buckets(/*start=*/ 1e-3, /*factor=*/ 2.0, /*count=*/ 20).unwrap(),
+    )
+    .unwrap()
+});
 
 /// Count of times the module publishing fallback was triggered in parallel execution.
 pub static MODULE_PUBLISHING_FALLBACK_COUNT: Lazy<IntCounter> = Lazy::new(|| {
@@ -184,7 +198,7 @@ pub static EFFECTIVE_BLOCK_GAS: Lazy<HistogramVec> = Lazy::new(|| {
 pub static APPROX_BLOCK_OUTPUT_SIZE: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "aptos_execution_approx_block_output_size",
-        "Historgram for different approx block output sizes - used for evaluting block ouptut limit.",
+        "Histogram for different approx block output sizes - used for evaluating block output limit.",
         &["mode"],
         output_buckets(),
     )
@@ -209,6 +223,22 @@ pub static BLOCK_COMMITTED_TXNS: Lazy<HistogramVec> = Lazy::new(|| {
         exponential_buckets(/*start=*/ 1.0, /*factor=*/ 2.0, /*count=*/ 30).unwrap(),
     )
     .unwrap()
+});
+
+pub static BLOCK_VIEW_DISTINCT_KEYS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_avg_counter_vec(
+        "aptos_execution_block_view_distinct_keys",
+        "Size (number of keys) ",
+        &["mode", "object_type"],
+    )
+});
+
+pub static BLOCK_VIEW_BASE_VALUES_MEMORY_USAGE: Lazy<HistogramVec> = Lazy::new(|| {
+    register_avg_counter_vec(
+        "aptos_execution_block_view_base_values_memory_usage",
+        "Memory usage (in bytes) for base values",
+        &["mode", "object_type"],
+    )
 });
 
 fn observe_gas(counter: &Lazy<HistogramVec>, mode_str: &str, fee_statement: &FeeStatement) {
@@ -275,3 +305,66 @@ pub(crate) fn update_txn_gas_counters(txn_fee_statements: &Vec<FeeStatement>, is
         observe_gas(&TXN_GAS, mode_str, fee_statement);
     }
 }
+
+pub(crate) fn update_state_counters(block_state_stats: BlockStateStats, is_parallel: bool) {
+    let mode_str = if is_parallel {
+        Mode::PARALLEL
+    } else {
+        Mode::SEQUENTIAL
+    };
+
+    BLOCK_VIEW_DISTINCT_KEYS
+        .with_label_values(&[mode_str, "resource"])
+        .observe(block_state_stats.num_resources as f64);
+    BLOCK_VIEW_DISTINCT_KEYS
+        .with_label_values(&[mode_str, "resource_group"])
+        .observe(block_state_stats.num_resource_groups as f64);
+    BLOCK_VIEW_DISTINCT_KEYS
+        .with_label_values(&[mode_str, "delayed_field"])
+        .observe(block_state_stats.num_delayed_fields as f64);
+    BLOCK_VIEW_DISTINCT_KEYS
+        .with_label_values(&[mode_str, "module"])
+        .observe(block_state_stats.num_modules as f64);
+
+    BLOCK_VIEW_BASE_VALUES_MEMORY_USAGE
+        .with_label_values(&[mode_str, "resource"])
+        .observe(block_state_stats.base_resources_size as f64);
+    BLOCK_VIEW_BASE_VALUES_MEMORY_USAGE
+        .with_label_values(&[mode_str, "delayed_field"])
+        .observe(block_state_stats.base_delayed_fields_size as f64);
+}
+
+pub static GLOBAL_MODULE_CACHE_SIZE_IN_BYTES: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "global_module_cache_size_in_bytes",
+        "Sum of sizes of all serialized modules stored in global module cache"
+    )
+    .unwrap()
+});
+
+pub static GLOBAL_MODULE_CACHE_NUM_MODULES: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "global_module_cache_num_modules",
+        "Number of modules cached in global module cache"
+    )
+    .unwrap()
+});
+
+pub static GLOBAL_MODULE_CACHE_MISS_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        // metric name
+        "global_module_cache_miss_seconds",
+        // metric description
+        "The time spent in seconds after global module cache miss to access per-block module cache",
+        time_buckets(),
+    )
+    .unwrap()
+});
+
+pub static STRUCT_NAME_INDEX_MAP_NUM_ENTRIES: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "struct_name_index_map_num_entries",
+        "Number of struct names interned and cached in execution environment"
+    )
+    .unwrap()
+});

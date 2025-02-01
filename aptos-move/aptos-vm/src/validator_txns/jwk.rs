@@ -1,7 +1,8 @@
 // Copyright © Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    aptos_vm::get_or_vm_startup_failure,
+    aptos_vm::get_system_transaction_output,
     errors::expect_only_successful_execution,
     move_vm_ext::{AptosMoveResolver, SessionId},
     system_module_names::{JWKS_MODULE, UPSERT_INTO_OBSERVED_JWKS},
@@ -16,21 +17,23 @@ use crate::{
 };
 use aptos_logger::debug;
 use aptos_types::{
-    fee_statement::FeeStatement,
     jwks,
     jwks::{Issuer, ObservedJWKs, ProviderJWKs, QuorumCertifiedUpdate},
     move_utils::as_move_value::AsMoveValue,
     on_chain_config::{OnChainConfig, ValidatorSet},
-    transaction::{ExecutionStatus, TransactionStatus},
+    transaction::TransactionStatus,
     validator_verifier::ValidatorVerifier,
 };
 use aptos_vm_logging::log_schema::AdapterLogSchema;
-use aptos_vm_types::output::VMOutput;
+use aptos_vm_types::{
+    module_and_script_storage::module_storage::AptosModuleStorage, output::VMOutput,
+};
 use move_core_types::{
     account_address::AccountAddress,
     value::{serialize_values, MoveValue},
     vm_status::{AbortLocation, StatusCode, VMStatus},
 };
+use move_vm_runtime::module_traversal::{TraversalContext, TraversalStorage};
 use move_vm_types::gas::UnmeteredGasMeter;
 use std::collections::HashMap;
 
@@ -55,12 +58,19 @@ impl AptosVM {
     pub(crate) fn process_jwk_update(
         &self,
         resolver: &impl AptosMoveResolver,
+        module_storage: &impl AptosModuleStorage,
         log_context: &AdapterLogSchema,
         session_id: SessionId,
         update: jwks::QuorumCertifiedUpdate,
     ) -> Result<(VMStatus, VMOutput), VMStatus> {
         debug!("Processing jwk transaction");
-        match self.process_jwk_update_inner(resolver, log_context, session_id, update) {
+        match self.process_jwk_update_inner(
+            resolver,
+            module_storage,
+            log_context,
+            session_id,
+            update,
+        ) {
             Ok((vm_status, vm_output)) => {
                 debug!("Processing jwk transaction ok.");
                 Ok((vm_status, vm_output))
@@ -86,6 +96,7 @@ impl AptosVM {
     fn process_jwk_update_inner(
         &self,
         resolver: &impl AptosMoveResolver,
+        module_storage: &impl AptosModuleStorage,
         log_context: &AdapterLogSchema,
         session_id: SessionId,
         update: jwks::QuorumCertifiedUpdate,
@@ -128,12 +139,13 @@ impl AptosVM {
 
         // All verification passed. Apply the `observed`.
         let mut gas_meter = UnmeteredGasMeter;
-        let mut session = self.new_session(resolver, session_id);
+        let mut session = self.new_session(resolver, session_id, None);
         let args = vec![
             MoveValue::Signer(AccountAddress::ONE),
             vec![observed].as_move_value(),
         ];
 
+        let traversal_storage = TraversalStorage::new();
         session
             .execute_function_bypass_visibility(
                 &JWKS_MODULE,
@@ -141,17 +153,19 @@ impl AptosVM {
                 vec![],
                 serialize_values(&args),
                 &mut gas_meter,
+                &mut TraversalContext::new(&traversal_storage),
+                module_storage,
             )
             .map_err(|e| {
                 expect_only_successful_execution(e, UPSERT_INTO_OBSERVED_JWKS.as_str(), log_context)
             })
             .map_err(|r| Unexpected(r.unwrap_err()))?;
 
-        let output = crate::aptos_vm::get_transaction_output(
+        let output = get_system_transaction_output(
             session,
-            FeeStatement::zero(),
-            ExecutionStatus::Success,
-            &get_or_vm_startup_failure(&self.storage_gas_params, log_context)
+            module_storage,
+            &self
+                .storage_gas_params(log_context)
                 .map_err(Unexpected)?
                 .change_set_configs,
         )

@@ -10,14 +10,11 @@ edition = "2018"
 cargo-fuzz = true
 
 [dependencies]
-arbitrary = "1.3.2"
-libfuzzer-sys = "0.4"
-move-binary-format = { path = "../../move-binary-format", features = ["fuzzing"] }
-move-bytecode-verifier = { path = "../" }
-move-core-types = { path = "../../move-core/types", features = ["fuzzing"] }
-# Prevent this from interfering with workspaces
-#[workspace]
-#members = ["."]
+arbitrary = { workspace = true }
+libfuzzer-sys = { workspace = true }
+move-binary-format = { workspace = true, features = ["fuzzing"] }
+move-bytecode-verifier = { workspace = true }
+move-core-types = { workspace = true, features = ["fuzzing"] }
 
 [[bin]]
 name = "code_unit"

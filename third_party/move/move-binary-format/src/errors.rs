@@ -16,6 +16,23 @@ pub type VMResult<T> = ::std::result::Result<T, VMError>;
 pub type BinaryLoaderResult<T> = ::std::result::Result<T, PartialVMError>;
 pub type PartialVMResult<T> = ::std::result::Result<T, PartialVMError>;
 
+/// This macro is used to panic while debugging fuzzing crashes obtaining the right stack trace.
+/// e.g. DEBUG_VM_STATUS=ABORTED,UNKNOWN_INVARIANT_VIOLATION_ERROR ./fuzz.sh run move_aptosvm_publish_and_run <testcase>
+/// third_party/move/move-core/types/src/vm_status.rs:506 for the list of status codes.
+#[cfg(feature = "fuzzing")]
+macro_rules! fuzzing_maybe_panic {
+    ($major_status:expr, $message:expr) => {{
+        if let Ok(debug_statuses) = std::env::var("DEBUG_VM_STATUS") {
+            if debug_statuses
+                .split(',')
+                .any(|s| s.trim() == format!("{:?}", $major_status))
+            {
+                panic!("PartialVMError: {:?} {:?}", $major_status, $message);
+            }
+        }
+    }};
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Location {
     Undefined,
@@ -146,6 +163,10 @@ impl VMError {
 
     pub fn major_status(&self) -> StatusCode {
         self.0.major_status
+    }
+
+    pub fn set_major_status(&mut self, major_status: StatusCode) {
+        self.0.major_status = major_status;
     }
 
     pub fn sub_status(&self) -> Option<u64> {
@@ -382,6 +403,17 @@ impl PartialVMError {
             indices,
             offsets,
         } = *self.0;
+        let bt = std::backtrace::Backtrace::capture();
+        let message = if std::backtrace::BacktraceStatus::Captured == bt.status() {
+            if let Some(message) = message {
+                Some(format!("{}\nBacktrace: {:#?}", message, bt).to_string())
+            } else {
+                Some(format!("Backtrace: {:#?}", bt).to_string())
+            }
+        } else {
+            message
+        };
+
         VMError(Box::new(VMError_ {
             major_status,
             sub_status,
@@ -423,6 +455,10 @@ impl PartialVMError {
         } else {
             None
         };
+
+        #[cfg(feature = "fuzzing")]
+        fuzzing_maybe_panic!(major_status, message);
+
         Self(Box::new(PartialVMError_ {
             major_status,
             sub_status: None,
@@ -491,7 +527,7 @@ impl PartialVMError {
         self
     }
 
-    /// Append the message `message` to the message field of the VM status, and insert a seperator
+    /// Append the message `message` to the message field of the VM status, and insert a separator
     /// if the original message is non-empty.
     pub fn append_message_with_separator(
         mut self,
@@ -530,7 +566,7 @@ impl fmt::Display for PartialVMError {
         }
 
         if let Some(msg) = &self.0.message {
-            status = format!("{} and message {}", status, msg);
+            status = format!("{} and message '{}'", status, msg);
         }
 
         for (kind, index) in &self.0.indices {

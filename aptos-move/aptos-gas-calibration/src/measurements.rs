@@ -3,7 +3,7 @@
 use crate::measurements_helpers::{get_dir_paths, list_entrypoints, record_gas_usage};
 use aptos_framework::{BuildOptions, BuiltPackage};
 use aptos_gas_algebra::DynamicExpression;
-use aptos_language_e2e_tests::executor::FakeExecutor;
+use aptos_language_e2e_tests::executor::{ExecFuncTimerDynamicArgs, FakeExecutor, GasMeterType};
 use move_binary_format::CompiledModule;
 use move_ir_compiler::Compiler;
 use std::{
@@ -162,13 +162,17 @@ fn compile_and_run_samples_ir(
                             .equation_names
                             .push(format!("{}::{}", &identifier, func_identifier.0));
 
-                        let elapsed = executor.exec_func_record_running_time(
-                            &module_id,
-                            &func_identifier.0,
-                            vec![],
-                            func_identifier.1.clone(),
-                            iterations,
-                        );
+                        let elapsed = executor
+                            .exec_func_record_running_time(
+                                &module_id,
+                                &func_identifier.0,
+                                vec![],
+                                func_identifier.1.clone(),
+                                iterations,
+                                ExecFuncTimerDynamicArgs::NoArgs,
+                                GasMeterType::UnmeteredGasMeter,
+                            )
+                            .elapsed_micros();
                         gas_measurement.regular_meter.push(elapsed);
 
                         // record with abstract gas meter

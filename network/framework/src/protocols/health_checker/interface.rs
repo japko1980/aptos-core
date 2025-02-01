@@ -3,7 +3,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    application::{error::Error, interface::NetworkClientInterface, metadata::ConnectionState},
+    application::{
+        error::Error, interface::NetworkClientInterface, metadata::ConnectionState,
+        storage::PeersAndMetadata,
+    },
+    peer::DisconnectReason,
     protocols::{
         health_checker::{HealthCheckerMsg, HealthCheckerNetworkEvents},
         network::Event,
@@ -16,6 +20,7 @@ use futures::{stream::FusedStream, Stream};
 use std::{
     collections::HashMap,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -58,12 +63,16 @@ impl<NetworkClient: NetworkClientInterface<HealthCheckerMsg>>
 
     /// Disconnect a peer, and keep track of the associated state
     /// Note: This removes the peer outright for now until we add GCing, and historical state management
-    pub async fn disconnect_peer(&mut self, peer_network_id: PeerNetworkId) -> Result<(), Error> {
+    pub async fn disconnect_peer(
+        &mut self,
+        peer_network_id: PeerNetworkId,
+        disconnect_reason: DisconnectReason,
+    ) -> Result<(), Error> {
         // Possibly already disconnected, but try anyways
         let _ = self.update_connection_state(peer_network_id, ConnectionState::Disconnecting);
         let result = self
             .network_client
-            .disconnect_from_peer(peer_network_id)
+            .disconnect_from_peer(peer_network_id, disconnect_reason)
             .await;
         let peer_id = peer_network_id.peer_id();
         if result.is_ok() {
@@ -132,6 +141,10 @@ impl<NetworkClient: NetworkClientInterface<HealthCheckerMsg>>
             .read()
             .get(&peer_id)
             .map(|health_check_data| health_check_data.failures)
+    }
+
+    pub fn get_peers_and_metadata(&self) -> Arc<PeersAndMetadata> {
+        self.network_client.get_peers_and_metadata()
     }
 
     // TODO: we shouldn't need to expose this

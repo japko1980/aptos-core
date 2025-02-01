@@ -5,33 +5,45 @@
 #![forbid(unsafe_code)]
 
 use crate::coverage_map::CoverageMap;
+use clap::ValueEnum;
 use codespan::{Files, Span};
-use colored::*;
+use colored::{self, Colorize};
 use move_binary_format::{
     access::ModuleAccess,
     file_format::{CodeOffset, FunctionDefinitionIndex},
     CompiledModule,
 };
 use move_bytecode_source_map::source_map::SourceMap;
+use move_command_line_common::files::FileHash;
 use move_core_types::identifier::Identifier;
 use move_ir_types::location::Loc;
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
+    fmt::{Display, Formatter},
     fs,
     io::{self, Write},
     path::Path,
+    str::FromStr,
 };
 
+/// Source-level coverage information for a function.
 #[derive(Clone, Debug, Serialize)]
 pub struct FunctionSourceCoverage {
+    /// Is this a native function?
+    /// If so, then `uncovered_locations` is empty.
     pub fn_is_native: bool,
+
+    /// List of source locations in the function that were not covered.
     pub uncovered_locations: Vec<Loc>,
 }
 
+/// Builder for the source code coverage.
 #[derive(Debug, Serialize)]
 pub struct SourceCoverageBuilder<'a> {
-    uncovered_locations: BTreeMap<Identifier, FunctionSourceCoverage>,
+    /// Mapping from function name to the source-level uncovered locations for that function.
+    pub uncovered_locations: BTreeMap<Identifier, FunctionSourceCoverage>,
+
     source_map: &'a SourceMap,
 }
 
@@ -40,6 +52,116 @@ pub enum AbstractSegment {
     Bounded { start: u32, end: u32 },
     BoundedRight { end: u32 },
     BoundedLeft { start: u32 },
+}
+
+/// Option to control use of color escape codes in coverage output
+/// to indicate source code coverage.  Unless `None`
+/// is selected, code which is covered is green, uncovered
+/// code is red.  By `Default`, color is only shown when
+/// output goes to a terminal.  If `Always`, then color
+/// escapes are included in the output even to a file
+/// or other program.
+#[derive(ValueEnum, Clone, Debug, Serialize)]
+pub enum ColorChoice {
+    /// Color is never shown
+    None,
+    /// Color is shown only on a terminal
+    Default,
+    /// Color is always shown
+    Always,
+}
+
+impl Display for ColorChoice {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        use ColorChoice::*;
+        match self {
+            None => f.write_str("none"),
+            Default => f.write_str("default"),
+            Always => f.write_str("always"),
+        }
+    }
+}
+
+impl FromStr for ColorChoice {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use ColorChoice::*;
+        match s {
+            "none" => Ok(None),
+            "default" => Ok(Default),
+            "always" => Ok(Always),
+            _ => Err("unknown variant"),
+        }
+    }
+}
+
+/// Option to control use of explicit textual indication of lines
+/// covered or not in test coverage listings.  If `On` or
+/// `Explicit` is selected, then lines with missing coverage
+/// are tagged with `-`; otherwise, they have `+`.
+#[derive(ValueEnum, Clone, Debug, Serialize)]
+pub enum TextIndicator {
+    /// No textual indicator of coverage.
+    None,
+    /// Prefix each line with some code missing coverage by `-`;
+    /// other lines are prefixed with `+`.
+    Explicit,
+    /// Same behavior as Explicit.
+    On,
+}
+
+impl Display for TextIndicator {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        use TextIndicator::*;
+        match self {
+            None => f.write_str("none"),
+            Explicit => f.write_str("explicit"),
+            On => f.write_str("on"),
+        }
+    }
+}
+
+impl FromStr for TextIndicator {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use TextIndicator::*;
+        match s {
+            "none" => Ok(None),
+            "explicit" => Ok(Explicit),
+            "on" => Ok(On),
+            _ => Err("unknown variant"),
+        }
+    }
+}
+
+impl ColorChoice {
+    fn execute(&self) {
+        use ColorChoice::*;
+        match self {
+            None => {
+                colored::control::set_override(false);
+            },
+            Default => {},
+            Always => {
+                colored::control::set_override(true);
+            },
+        }
+    }
+
+    fn undo(&self) {
+        use ColorChoice::*;
+        match self {
+            None => {
+                colored::control::unset_override();
+            },
+            Default => {},
+            Always => {
+                colored::control::unset_override();
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -136,15 +258,17 @@ impl<'a> SourceCoverageBuilder<'a> {
         let file_contents = fs::read_to_string(file_path).unwrap();
         assert!(
             self.source_map.check(&file_contents),
-            "File contents out of sync with source map"
+            "File contents {} out of sync with source map",
+            file_path.display()
         );
+        let file_hash = self.source_map.definition_location.file_hash();
         let mut files = Files::new();
         let file_id = files.add(file_path.as_os_str().to_os_string(), file_contents.clone());
 
         let mut uncovered_segments = BTreeMap::new();
 
-        for (_, fn_cov) in self.uncovered_locations.iter() {
-            for span in merge_spans(fn_cov.clone()).into_iter() {
+        for (_key, fn_cov) in self.uncovered_locations.iter() {
+            for span in merge_spans(file_hash, fn_cov.clone()).into_iter() {
                 let start_loc = files.location(file_id, span.start()).unwrap();
                 let end_loc = files.location(file_id, span.end()).unwrap();
                 let start_line = start_loc.line.0;
@@ -177,6 +301,7 @@ impl<'a> SourceCoverageBuilder<'a> {
                 }
             }
         }
+        uncovered_segments.values_mut().for_each(|v| v.sort());
 
         let mut annotated_lines = Vec::new();
         for (line_number, mut line) in file_contents.lines().map(|x| x.to_owned()).enumerate() {
@@ -226,8 +351,40 @@ impl<'a> SourceCoverageBuilder<'a> {
 }
 
 impl SourceCoverage {
-    pub fn output_source_coverage<W: Write>(&self, output_writer: &mut W) -> io::Result<()> {
+    pub fn output_source_coverage<W: Write>(
+        &self,
+        output_writer: &mut W,
+        color: ColorChoice,
+        text_indicator: TextIndicator,
+    ) -> io::Result<()> {
+        color.execute();
+        let be_explicit = match text_indicator {
+            TextIndicator::Explicit | TextIndicator::On => {
+                write!(
+                    output_writer,
+                    "Code coverage per line of code:\n  {} indicates the line is not executable or is fully covered during execution\n  {} indicates the line is executable but NOT fully covered during execution\nSource code follows:\n",
+                    "+".to_string().green(),
+                    "-".to_string().bold().red(),
+                )?;
+                true
+            },
+            TextIndicator::None => false,
+        };
         for line in self.annotated_lines.iter() {
+            if be_explicit {
+                let has_uncovered = line
+                    .iter()
+                    .any(|string_segment| matches!(string_segment, StringSegment::Uncovered(_)));
+                write!(
+                    output_writer,
+                    "{} ",
+                    if has_uncovered {
+                        "-".to_string().red()
+                    } else {
+                        "+".to_string().green()
+                    }
+                )?;
+            }
             for string_segment in line.iter() {
                 match string_segment {
                     StringSegment::Covered(s) => write!(output_writer, "{}", s.green())?,
@@ -236,34 +393,112 @@ impl SourceCoverage {
             }
             writeln!(output_writer)?;
         }
+        color.undo();
         Ok(())
     }
 }
 
-fn merge_spans(cov: FunctionSourceCoverage) -> Vec<Span> {
+/// Merge overlapping spans.
+pub fn merge_spans(file_hash: FileHash, cov: FunctionSourceCoverage) -> Vec<Span> {
     if cov.uncovered_locations.is_empty() {
         return vec![];
     }
 
-    let mut covs: Vec<_> = cov
+    let mut spans = cov
         .uncovered_locations
         .iter()
+        .filter(|loc| loc.file_hash() == file_hash)
         .map(|loc| Span::new(loc.start(), loc.end()))
-        .collect();
-    covs.sort();
+        .collect::<Vec<_>>();
+    if spans.is_empty() {
+        return vec![];
+    }
+    spans.sort();
 
-    let mut unioned = Vec::new();
-    let mut curr = covs.remove(0);
+    let mut unioned = Vec::with_capacity(spans.len());
+    let mut curr = spans.remove(0);
 
-    for interval in covs {
-        if curr.disjoint(interval) {
-            unioned.push(curr);
-            curr = interval;
+    for span in spans {
+        if curr.end() >= span.start() {
+            curr = curr.merge(span);
         } else {
-            curr = curr.merge(interval);
+            unioned.push(curr);
+            curr = span;
         }
     }
 
     unioned.push(curr);
     unioned
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FunctionSourceCoverage;
+    use crate::source_coverage::merge_spans;
+    use codespan::Span;
+    use move_command_line_common::files::FileHash;
+    use move_ir_types::location::Loc;
+
+    /// Ensure merging spans works as expected.
+    #[test]
+    fn test_merge_spans_works() {
+        let test_hash = FileHash([0; 32]);
+        let other_hash = FileHash([1; 32]);
+
+        // Let's use unsorted array on purpose.
+        let uncovered_locations = vec![
+            // Should be merged:
+            Loc::new(test_hash, 50, 51),
+            Loc::new(test_hash, 51, 52),
+            // Should be merged:
+            Loc::new(test_hash, 3, 5),
+            Loc::new(test_hash, 2, 10),
+            Loc::new(test_hash, 5, 11),
+            // Should stay the same:
+            Loc::new(test_hash, 15, 16),
+            // Should be merged:
+            Loc::new(test_hash, 20, 25),
+            Loc::new(test_hash, 24, 25),
+            Loc::new(test_hash, 21, 25),
+            // Should stay the same:
+            Loc::new(test_hash, 26, 29),
+            // Shouldn't intefere with other hashes.
+            Loc::new(other_hash, 2, 20),
+        ];
+        let expected_spans = vec![
+            Span::new(2, 11),
+            Span::new(15, 16),
+            Span::new(20, 25),
+            Span::new(26, 29),
+            Span::new(50, 52),
+        ];
+
+        let cov = FunctionSourceCoverage {
+            fn_is_native: false,
+            uncovered_locations,
+        };
+        assert_eq!(expected_spans, merge_spans(test_hash, cov));
+    }
+
+    /// Ensure merging spans works fine when there is no spans to be merged.
+    #[test]
+    fn test_merge_spans_when_spans_are_empty() {
+        let test_hash = FileHash([0; 32]);
+        let other_hash = FileHash([1; 32]);
+
+        // Check that it works when are files have full coverage.
+        let cov = FunctionSourceCoverage {
+            fn_is_native: false,
+            uncovered_locations: vec![],
+        };
+        assert!(merge_spans(test_hash, cov).is_empty());
+
+        // Check that it works when the hash under test has the full coverage.
+        let uncovered_locations = vec![Loc::new(other_hash, 2, 20)];
+        let cov = FunctionSourceCoverage {
+            fn_is_native: false,
+            uncovered_locations,
+        };
+        assert!(merge_spans(test_hash, cov).is_empty());
+    }
 }

@@ -1,4 +1,5 @@
 // Copyright © Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{
     vec_deque::{IntoIter, Iter},
@@ -50,6 +51,14 @@ impl<T> BoundedVecDeque<T> {
 
     pub fn iter(&self) -> Iter<'_, T> {
         self.inner.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
