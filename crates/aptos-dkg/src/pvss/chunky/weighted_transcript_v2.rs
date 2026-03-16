@@ -32,7 +32,7 @@ use crate::{
         CurveGroupTrait, Trait as _,
     },
 };
-use anyhow::bail;
+use anyhow::{anyhow, bail};
 use aptos_crypto::{
     arkworks::{
         msm,
@@ -45,7 +45,7 @@ use aptos_crypto::{
     weighted_config::WeightedConfigArkworks as SecretSharingConfig,
     CryptoMaterialError, TSecretSharingConfig, ValidCryptoMaterial,
 };
-use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, VariableBaseMSM};
+use ark_ec::{pairing::Pairing, CurveGroup, VariableBaseMSM};
 use ark_ff::{AdditiveGroup, Field, Fp, FpConfig};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rand_core::{CryptoRng, RngCore};
@@ -245,14 +245,8 @@ impl<const N: usize, P: FpConfig<N>, E: Pairing<ScalarField = Fp<P, N>>> Transcr
         // Vs_flat is the inner Vec<E::G2> from CodomainShape
         let Vs: Vec<Vec<E::G2Affine>> = sc.group_by_player(&Vs_flat);
 
-        // debug_assert_eq!(
-        //     Cs.len(),
-        //     sc.get_total_weight(),
-        //     "Number of encrypted chunks must equal number of players"
-        // );
-
         // Generate the batch range proof, given the `range_proof_commitment` produced in the PoK
-        let range_proof = dekart_univariate_v2::Proof::prove(
+        let range_proof_projective = dekart_univariate_v2::Proof::prove(
             &pp.pk_range_proof,
             &f_evals_chunked_flat,
             pp.ell,
@@ -264,7 +258,7 @@ impl<const N: usize, P: FpConfig<N>, E: Pairing<ScalarField = Fp<P, N>>> Transcr
         // Assemble the sharing proof
         let sharing_proof = SharingProof {
             SoK,
-            range_proof,
+            range_proof: range_proof_projective.into(), // Doing G1 normalisation here
             range_proof_commitment: univariate_hiding_kzg::CommitmentNormalised(
                 range_proof_commitment.0.clone(),
             ),
@@ -297,6 +291,7 @@ impl<const N: usize, P: FpConfig<N>, E: Pairing<ScalarField = Fp<P, N>>>
     ) -> anyhow::Result<()> {
         let sok_cntxt = verify_weighted_preamble(
             sc,
+            pp,
             &self.subtrs,
             &self.dealer,
             spks,
@@ -306,15 +301,12 @@ impl<const N: usize, P: FpConfig<N>, E: Pairing<ScalarField = Fp<P, N>>>
         )?;
 
         {
-            // Verify the range proof (convert CommitmentNormalised to Commitment for verify)
-            let comm_for_verify = sigma_protocol::homomorphism::TrivialShape(
-                self.sharing_proof.range_proof_commitment.0.into_group(),
-            );
+            // Verify the range proof
             if let Err(err) = self.sharing_proof.range_proof.verify(
                 &pp.pk_range_proof.vk,
                 sc.get_total_weight() * num_chunks_per_scalar::<E::ScalarField>(pp.ell) as usize,
                 pp.ell,
-                &comm_for_verify,
+                &self.sharing_proof.range_proof_commitment,
                 rng,
             ) {
                 bail!("Range proof batch verification failed: {:?}", err);
@@ -330,7 +322,7 @@ impl<const N: usize, P: FpConfig<N>, E: Pairing<ScalarField = Fp<P, N>>>
             &sc.get_threshold_config().domain,
         );
         let Vs_flat = self.subtrs.all_Vs_flat();
-        let ldt_msm_terms = ldt.ldt_msm_input::<E::G2>(&Vs_flat)?;
+        let ldt_msm_terms = ldt.ldt_msm_input(&Vs_flat)?;
 
         let eks_inner: Vec<_> = eks.iter().map(|ek| ek.ek).collect();
         let lagr_g1: &[E::G1Affine] = match &pp.pk_range_proof.ck_S.msm_basis {
@@ -365,7 +357,7 @@ impl<const N: usize, P: FpConfig<N>, E: Pairing<ScalarField = Fp<P, N>>>
             .sharing_proof
             .SoK
             .prover_commitment()
-            .expect("SoK must contain commitment for Fiat–Shamir");
+            .ok_or_else(|| anyhow!("SoK prover commitment missing"))?;
         let c = hom.fiat_shamir_challenge_for_sigma_protocol(
             &sok_cntxt,
             &public_statement,
@@ -377,8 +369,8 @@ impl<const N: usize, P: FpConfig<N>, E: Pairing<ScalarField = Fp<P, N>>>
             &prover_first_message.0,
             &self.sharing_proof.SoK.z,
             c,
-        );
-        let first_merged = msm::merge_msm_inputs::<E::G1Affine, _>(&first_msm_terms, rng);
+        )?;
+        let first_merged = msm::merge_msm_inputs::<E::G1Affine, _>(&first_msm_terms, rng)?;
         hom.hom1.check_msm_eval_zero(first_merged)?;
 
         let second_msm_terms = hom.hom2.msm_terms_for_verify_with_challenge(
@@ -386,16 +378,16 @@ impl<const N: usize, P: FpConfig<N>, E: Pairing<ScalarField = Fp<P, N>>>
             &prover_first_message.1,
             &self.sharing_proof.SoK.z,
             c,
-        );
-        let second_merged = msm::merge_msm_inputs::<E::G2Affine, _>(&second_msm_terms, rng);
+        )?;
+        let second_merged = msm::merge_msm_inputs::<E::G2Affine, _>(&second_msm_terms, rng)?;
         let beta = sample_field_element(rng);
         let g2_inputs = vec![second_merged, ldt_msm_terms];
         let merged_g2 = msm::merge_msm_inputs_with_scales::<E::G2Affine>(&g2_inputs, &[
             E::ScalarField::ONE,
             beta,
-        ]);
+        ])?;
         let g2_msm = E::G2::msm(merged_g2.bases(), merged_g2.scalars())
-            .expect("Failed to compute merged G2 MSM in chunky v2");
+            .map_err(|len| anyhow!("Failed to compute merged G2 MSM in chunky v2 (bases/scalars length mismatch, shortest length: {})", len))?;
         if g2_msm != E::G2::ZERO {
             bail!("G2 MSM check failed (expected zero)");
         }

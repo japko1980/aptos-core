@@ -125,6 +125,10 @@ pub trait TranscriptCore: Debug + ValidCryptoMaterial + Clone + PartialEq + Eq {
 ///    reconstruct the secret (but no fewer can)
 /// 2. Weighted $w$-out-of-$W$ PVSS protocols where any players with combined weight $\ge w$ can
 ///    reconstruct the secret (but players with combined weight $< w$ cannot)
+///
+/// TODO: instead of `Transcript: TranscriptCore` there should be an associated type
+/// `type TranscriptCore = TranscriptCore`, so we can get rid of reimplementing / delegating
+/// the TranscriptCore methods
 pub trait Transcript: TranscriptCore {
     type SigningSecretKey: Uniform + SigningKey<VerifyingKeyMaterial = Self::SigningPubKey>;
     type SigningPubKey: VerifyingKey<SigningKeyMaterial = Self::SigningSecretKey>;
@@ -326,8 +330,10 @@ pub trait MalleableTranscript: Transcript {
 pub trait WithMaxNumShares {
     fn with_max_num_shares(n: u32) -> Self;
 
+    // TODO: rethink this function and the next one
     fn with_max_num_shares_and_bit_size(n: u32, ell: u8) -> Self;
 
     /// This is a modified function which might create public parameters that are fairly nonsensical, but which are sufficient for `generate()`
+    /// TODO: Not sure we need `n` here
     fn with_max_num_shares_for_generate(n: u32) -> Self;
 }

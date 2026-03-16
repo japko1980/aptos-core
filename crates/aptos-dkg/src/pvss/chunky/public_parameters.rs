@@ -4,7 +4,7 @@
 //! This submodule implements the *public parameters* for this "chunked_elgamal_field" PVSS scheme.
 
 use crate::{
-    dlog,
+    dlog::BabyStepTable,
     pvss::{
         chunky::{
             chunked_elgamal::num_chunks_per_scalar, chunked_elgamal_pp, input_secret::InputSecret,
@@ -28,13 +28,15 @@ use ark_serialize::{SerializationError, Valid};
 use ark_std::log2;
 use rand::{thread_rng, CryptoRng, RngCore};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::{collections::HashMap, ops::Mul};
+use std::ops::Mul;
 
 const DST: &[u8] = b"APTOS_CHUNKED_ELGAMAL_FIELD_PVSS_DST"; // This DST will be used in setting up a group generator `G_2`, see below
+const DEFAULT_MAX_AGGREGATION: usize = 166;
+const DLOG_EXTRA_BITS: u8 = 4;
 
 /// Default extra bits for the dlog table when deserializing legacy PublicParameters that did not store this field.
-fn default_dlog_extra_bits() -> u64 {
-    6
+fn default_dlog_extra_bits() -> u8 {
+    DLOG_EXTRA_BITS
 }
 
 fn compute_powers_of_radix<E: Pairing>(ell: u8) -> Vec<E::ScalarField> {
@@ -66,10 +68,10 @@ pub struct PublicParameters<E: Pairing> {
 
     /// Extra bits for the dlog baby-step table size. Must be serialized so clone/deserialize rebuild the same table.
     #[serde(default = "default_dlog_extra_bits")]
-    pub dlog_extra_bits: u64,
+    pub dlog_extra_bits: u8,
 
     #[serde(skip)]
-    pub dlog_table: HashMap<Vec<u8>, u64>,
+    pub dlog_table: BabyStepTable<E::G1Affine>,
 
     #[serde(skip)]
     pub G2_table: BatchMulPreprocessing<E::G2>,
@@ -80,7 +82,6 @@ pub struct PublicParameters<E: Pairing> {
 
 impl<E: Pairing> Clone for PublicParameters<E> {
     fn clone(&self) -> Self {
-        let g: E::G1 = self.pp_elgamal.G.into();
         Self {
             max_num_shares: self.max_num_shares,
             pp_elgamal: self.pp_elgamal.clone(),
@@ -89,12 +90,7 @@ impl<E: Pairing> Clone for PublicParameters<E> {
             ell: self.ell,
             max_aggregation: self.max_aggregation,
             dlog_extra_bits: self.dlog_extra_bits,
-            dlog_table: Self::build_dlog_table(
-                g,
-                self.ell,
-                self.max_aggregation,
-                self.dlog_extra_bits,
-            ),
+            dlog_table: self.dlog_table.clone(),
             G2_table: BatchMulPreprocessing::new(self.G_2.into(), self.max_num_shares as usize), // Recreate table because it doesn't allow for Copy/Clone? TODO: Fix this
             powers_of_radix: compute_powers_of_radix::<E>(self.ell),
         }
@@ -157,7 +153,7 @@ impl<'de, E: Pairing> Deserialize<'de> for PublicParameters<E> {
             max_num_shares: u32,
             max_aggregation: usize,
             #[serde(default = "default_dlog_extra_bits")]
-            dlog_extra_bits: u64,
+            dlog_extra_bits: u8,
         }
 
         let serialized = SerializedFields::<E>::deserialize(deserializer)?;
@@ -201,12 +197,16 @@ impl<E: Pairing> PublicParameters<E> {
         G: E::G1,
         ell: u8,
         max_aggregation: usize,
-        extra_bits: u64,
-    ) -> HashMap<Vec<u8>, u64> {
-        dlog::table::build::<E::G1>(
-            G,
-            1u64 << (extra_bits + ((ell as u64 + log2(max_aggregation) as u64) / 2)),
-        )
+        extra_bits: u8,
+    ) -> BabyStepTable<E::G1Affine> {
+        let table_size_exp: u8 = extra_bits + ((ell + log2(max_aggregation) as u8) / 2); // TODO: I think we need the floor of log_2 here, not the ceiling?
+        eprintln!(
+            "[build_dlog_table] table_size = {} (ell={}, max_aggregation={}, extra_bits={})",
+            table_size_exp, ell, max_aggregation, extra_bits
+        );
+        let tbl = BabyStepTable::new(G.into_affine(), 1u32 << table_size_exp);
+        eprintln!("[build_dlog_table] table_size = {}", tbl.table_size);
+        tbl
     }
 
     pub(crate) fn get_dlog_range_bound(&self) -> u64 {
@@ -274,9 +274,8 @@ impl<E: Pairing> PublicParameters<E> {
 
         let group_generators = GroupGenerators::default(); // TODO: At least one of these should come from a powers of tau ceremony?
         let pp_elgamal = chunked_elgamal_pp::PublicParameters::new(max_num_shares);
-        let G = *pp_elgamal.message_base();
+        let G_1 = *pp_elgamal.message_base();
         let G_2 = g2.unwrap_or_else(|| hashing::unsafe_hash_to_affine(b"G_2", DST));
-        const DLOG_EXTRA_BITS: u64 = 6;
         let pp = Self {
             max_num_shares,
             pp_elgamal,
@@ -291,7 +290,7 @@ impl<E: Pairing> PublicParameters<E> {
             ell,
             max_aggregation,
             dlog_extra_bits: DLOG_EXTRA_BITS,
-            dlog_table: Self::build_dlog_table(G.into(), ell, max_aggregation, DLOG_EXTRA_BITS),
+            dlog_table: Self::build_dlog_table(G_1.into(), ell, max_aggregation, DLOG_EXTRA_BITS),
             G2_table: BatchMulPreprocessing::new(G_2.into(), max_num_shares as usize),
             powers_of_radix: compute_powers_of_radix::<E>(ell),
         };
@@ -325,25 +324,37 @@ impl<E: Pairing> ValidCryptoMaterial for PublicParameters<E> {
     }
 }
 
-pub const DEFAULT_ELL_FOR_TESTING: u8 = 16; // TODO: made this a const to emphasize that the parameter is completely fixed wherever this value used (namely below), might not be ideal
+pub const DEFAULT_ELL_FOR_TESTING: u8 = 32; // TODO: made this a const to emphasize that the parameter is completely fixed wherever this value used (namely below), might not be ideal
 
 impl<E: Pairing> Default for PublicParameters<E> {
     // This is only used for testing and benchmarking
     fn default() -> Self {
         let mut rng = thread_rng();
-        Self::new(1, DEFAULT_ELL_FOR_TESTING, 1, None, &mut rng)
+        Self::new(
+            1,
+            DEFAULT_ELL_FOR_TESTING,
+            DEFAULT_MAX_AGGREGATION,
+            None,
+            &mut rng,
+        )
     }
 }
 
 impl<E: Pairing> WithMaxNumShares for PublicParameters<E> {
     fn with_max_num_shares(n: u32) -> Self {
         let mut rng = thread_rng();
-        Self::new(n, DEFAULT_ELL_FOR_TESTING, 1, None, &mut rng)
+        Self::new(
+            n,
+            DEFAULT_ELL_FOR_TESTING,
+            DEFAULT_MAX_AGGREGATION,
+            None,
+            &mut rng,
+        )
     }
 
     fn with_max_num_shares_and_bit_size(n: u32, ell: u8) -> Self {
         let mut rng = thread_rng();
-        Self::new(n, ell, 1, None, &mut rng)
+        Self::new(n, ell, DEFAULT_MAX_AGGREGATION, None, &mut rng)
     }
 
     // The only thing from `pp` that `generate()` uses is `pp.ell`, so make the rest as small as possible.
