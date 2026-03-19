@@ -3128,6 +3128,7 @@ dependencies = [
 name = "aptos-move-cli"
 version = "1.0.0"
 dependencies = [
+ "ahash 0.8.12",
  "anyhow",
  "aptos-api-types",
  "aptos-cached-packages",
@@ -3146,11 +3147,13 @@ dependencies = [
  "aptos-vm-environment",
  "aptos-vm-logging",
  "aptos-vm-types",
+ "async-recursion",
  "async-trait",
  "bcs 0.1.4",
  "clap 4.5.60",
  "colored",
  "futures",
+ "hex",
  "itertools 0.13.0",
  "legacy-move-compiler",
  "mockall 0.11.4",
