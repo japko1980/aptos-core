@@ -534,6 +534,15 @@ pub enum MicroOp {
     },
 
     //======================================================================
+    // Gas metering
+    //======================================================================
+    // Inserted by the instrumentation pass; never emitted directly by user code.
+    //======================================================================
+    /// Charge a pre-computed static gas cost for the current basic block.
+    /// The interpreter must call the gas meter and abort on exhaustion.
+    Charge { cost: u64 },
+
+    //======================================================================
     // Debugging
     //======================================================================
     /// Advance the interpreter's RNG and write a random u64 to `dst`.
@@ -555,7 +564,6 @@ pub enum MicroOp {
     // - **Boolean**: logical Not, And, Or (distinct from bitwise).
     // - **Global storage**: MoveTo, MoveFrom, BorrowGlobal, Exists.
     // - **Closures / function values**
-    // - **Gas metering**: explicit charge points.
     // - **Runtime instrumentation**: tracing, profiling, coverage hooks.
     //======================================================================
 }

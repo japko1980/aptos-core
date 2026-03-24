@@ -642,6 +642,10 @@ impl InterpreterContext<'_> {
                     write_ptr(fp, dst, obj_ptr);
                     write_u64(fp, dst + 8, offset as u64);
                 },
+
+                MicroOp::Charge { .. } => {
+                    // TODO: wire up to a GasMeter once the runtime carries one.
+                },
             }
         }
 

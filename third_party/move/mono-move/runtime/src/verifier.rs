@@ -327,6 +327,9 @@ impl FunctionVerifier<'_> {
                 self.check_nonzero_size(pc, size);
                 self.check_frame_access(Some(pc), src, size);
             },
+
+            // Inserted by the instrumentation pass; no frame accesses to verify.
+            MicroOp::Charge { .. } => {},
         }
     }
 
