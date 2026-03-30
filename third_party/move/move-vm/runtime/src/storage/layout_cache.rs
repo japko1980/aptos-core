@@ -34,7 +34,7 @@ use triomphe::Arc as TriompheArc;
 /// detected and evicted.
 #[derive(Debug, Default)]
 pub struct DefiningModules {
-    modules: HashSet<ModuleId>,
+    modules: HashSet<ModuleId, ahash::RandomState>,
     seen_modules: Vec<(ModuleId, [u8; 32])>,
 }
 
@@ -42,9 +42,14 @@ impl DefiningModules {
     /// Returns a new empty set of modules.
     pub fn new() -> Self {
         Self {
-            modules: HashSet::new(),
+            modules: HashSet::with_hasher(ahash::RandomState::new()),
             seen_modules: vec![],
         }
+    }
+
+    /// Returns true if the module is already in the set.
+    pub fn contains(&self, module_id: &ModuleId) -> bool {
+        self.modules.contains(module_id)
     }
 
     /// If module is not in the set, adds it with its hash.
