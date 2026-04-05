@@ -3440,6 +3440,7 @@ dependencies = [
  "aptos-proptest-helpers",
  "aptos-short-hex-str",
  "aptos-time-service",
+ "aptos-token-bucket",
  "aptos-types",
  "arc-swap",
  "async-trait",
