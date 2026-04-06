@@ -12692,7 +12692,9 @@ dependencies = [
  "move-asm",
  "move-binary-format",
  "move-core-types",
+ "move-vm-types",
  "parking_lot 0.12.5",
+ "specializer",
 ]
 
 [[package]]
@@ -12722,6 +12724,25 @@ dependencies = [
  "mono-move-alloc",
  "mono-move-core",
  "rand 0.7.3",
+]
+
+[[package]]
+name = "mono-move-testsuite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "legacy-move-compiler",
+ "libtest-mimic",
+ "mono-move-global-context",
+ "mono-move-runtime",
+ "move-binary-format",
+ "move-compiler-v2",
+ "move-core-types",
+ "move-vm-runtime",
+ "move-vm-test-utils",
+ "move-vm-types",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]
