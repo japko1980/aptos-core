@@ -12681,6 +12681,9 @@ dependencies = [
 [[package]]
 name = "mono-move-gas"
 version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "mono-move-global-context"
@@ -12692,6 +12695,9 @@ dependencies = [
  "fxhash",
  "mono-move-alloc",
  "mono-move-core",
+ "mono-move-gas",
+ "mono-move-runtime",
+ "mono-move-testsuite",
  "move-asm",
  "move-binary-format",
  "move-core-types",
@@ -12708,6 +12714,7 @@ dependencies = [
  "legacy-move-compiler",
  "mono-move-alloc",
  "mono-move-core",
+ "mono-move-gas",
  "mono-move-runtime",
  "move-binary-format",
  "move-compiler-v2",
@@ -12726,7 +12733,9 @@ dependencies = [
  "anyhow",
  "mono-move-alloc",
  "mono-move-core",
+ "mono-move-gas",
  "rand 0.7.3",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -12736,6 +12745,7 @@ dependencies = [
  "anyhow",
  "legacy-move-compiler",
  "libtest-mimic",
+ "mono-move-gas",
  "mono-move-global-context",
  "mono-move-runtime",
  "move-binary-format",
