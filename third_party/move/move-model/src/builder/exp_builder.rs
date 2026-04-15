@@ -33,7 +33,10 @@ use crate::{
         ReceiverFunctionInstance, ReferenceKind, Substitution, Type, TypeDisplayContext,
         TypeUnificationError, UnificationContext, Variance, WideningOrder, BOOL_TYPE,
     },
-    well_known::{UNSPECIFIED_ABORT_CODE, VECTOR_FUNCS_WITH_BYTECODE_INSTRS, VECTOR_MODULE},
+    well_known::{
+        BORROW_GLOBAL, BORROW_GLOBAL_MUT, UNSPECIFIED_ABORT_CODE,
+        VECTOR_FUNCS_WITH_BYTECODE_INSTRS, VECTOR_MODULE,
+    },
 };
 use codespan_reporting::diagnostic::Severity;
 use itertools::Itertools;
@@ -4185,11 +4188,11 @@ impl ExpTranslator<'_, '_, '_> {
         let type_opt = convert_name_to_type(&resource_ty_exp.loc, resource_ty_exp.clone().value);
         if let Some(ty) = type_opt {
             let name = if mutable {
-                self.symbol_pool().make("borrow_global_mut")
+                self.symbol_pool().make(BORROW_GLOBAL_MUT)
             } else {
-                self.symbol_pool().make("borrow_global")
+                self.symbol_pool().make(BORROW_GLOBAL)
             };
-            self.translate_call(
+            let result = self.translate_call(
                 loc,
                 &self.to_loc(&resource_ty_exp.loc),
                 CallKind::Regular,
@@ -4199,7 +4202,18 @@ impl ExpTranslator<'_, '_, '_> {
                 &[addr_exp],
                 expected_type,
                 context,
-            )
+            );
+            // translate_call may wrap the result in a Freeze node when the
+            // expected type is an immutable reference. Set the surface syntax
+            // on the inner node so it is attached to the actual operation.
+            let target_id = if let ExpData::Call(_, Operation::Freeze(_), args) = &result {
+                args[0].node_id()
+            } else {
+                result.node_id()
+            };
+            self.env()
+                .set_surface_syntax(target_id, SurfaceSyntax::IndexNotation);
+            result
         } else {
             self.new_error_exp()
         }
