@@ -1116,6 +1116,14 @@ pub static BATCH_COORDINATOR_NUM_BATCH_REQS: Lazy<IntCounterVec> = Lazy::new(|| 
     .unwrap()
 });
 
+pub static REMOTE_BATCH_COORDINATOR_DROPPED_MSGS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "quorum_store_remote_batch_coordinator_dropped_msgs",
+        "Dropped messages at remote batch coordinator ingress."
+    )
+    .unwrap()
+});
+
 // Histogram buckets that expand DEFAULT_BUCKETS with more granularity:
 // * 0.3 to 2.0: step 0.1
 // * 2.0 to 4.0: step 0.2
