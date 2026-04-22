@@ -31,7 +31,7 @@ impl fmt::Display for ModuleIR {
             name
         )?;
 
-        for func_ir in &self.functions {
+        for func_ir in self.functions.iter().flatten() {
             writeln!(f)?;
             display_function(f, module, func_ir)?;
         }

@@ -34,7 +34,7 @@ fn format_micro_ops(module_ir: &ModuleIR) -> String {
         mod_name
     ));
 
-    for func_ir in &module_ir.functions {
+    for func_ir in module_ir.functions.iter().flatten() {
         let func_name = module.identifier_at(func_ir.name_idx).to_string();
         match try_build_context(module, func_ir, &func_id_map) {
             Err(e) => {

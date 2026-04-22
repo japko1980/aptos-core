@@ -63,7 +63,7 @@ fn print_stats(module_ir: &specializer::stackless_exec_ir::ModuleIR) {
     let mod_name = module.identifier_at(self_handle.name);
     let mod_prefix = format!("0x{}::{}", addr.short_str_lossless(), mod_name);
 
-    for func_ir in &module_ir.functions {
+    for func_ir in module_ir.functions.iter().flatten() {
         let func_name = module.identifier_at(func_ir.name_idx);
 
         // Find the matching FunctionDefinition to get bytecode stats.
