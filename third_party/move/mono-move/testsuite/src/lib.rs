@@ -4,9 +4,11 @@
 //! Library for the mono-move differential test harness.
 
 pub mod matcher;
+pub mod module_provider;
 pub mod parser;
 pub mod runner;
 
+pub use module_provider::InMemoryModuleProvider;
 use move_binary_format::file_format::CompiledModule;
 
 /// Compile Move sources into all contained modules.
