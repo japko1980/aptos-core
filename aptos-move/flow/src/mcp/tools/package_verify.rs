@@ -24,7 +24,7 @@ struct MovePackageVerifyParams {
     /// Each entry follows the same format as `filter`: `module_name` or
     /// `module_name::function_name`. Exclusions take precedence over the filter scope.
     exclude: Option<Vec<String>>,
-    /// Solver timeout per verification condition, in seconds. Default: 10. Maximum: 10.
+    /// Solver timeout per verification condition, in seconds. Default: 10. Maximum: 60.
     timeout: Option<usize>,
 }
 
@@ -120,6 +120,7 @@ impl FlowSession {
                 options.prover.verify_scope = verification_scope;
                 options.prover.verify_exclude = verify_exclude;
                 options.backend.vc_timeout = vc_timeout;
+                aptos_framework::prover::configure_aptos_custom_natives(&mut options);
                 #[cfg(test)]
                 {
                     options.prover.stable_test_output = true;
