@@ -209,6 +209,10 @@ pub enum FeatureFlag {
     /// via the paired `MintRef`, instead of minting a coin and converting it. This avoids
     /// touching the legacy coin supply aggregator (v1), reducing Block-STM contention.
     GAS_REFUND_FA_MINT = 124,
+    /// When enabled, `FunctionInfo`-based dispatch (dispatchable fungible assets and
+    /// account abstraction) runs via function values from `std::reflect` instead of the
+    /// legacy native dispatch machinery. Requires `ENABLE_FUNCTION_REFLECTION`.
+    FUNCTION_VALUE_DISPATCH = 125,
 }
 
 impl FeatureFlag {
