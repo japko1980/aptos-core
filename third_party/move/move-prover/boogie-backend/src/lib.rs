@@ -21,21 +21,24 @@ use move_model::{
     pragmas::{
         INTRINSIC_FUN_MAP_ADD_ALL, INTRINSIC_FUN_MAP_ADD_NO_OVERRIDE,
         INTRINSIC_FUN_MAP_ADD_OVERRIDE_IF_EXISTS, INTRINSIC_FUN_MAP_APPEND,
-        INTRINSIC_FUN_MAP_APPEND_DISJOINT, INTRINSIC_FUN_MAP_BORROW, INTRINSIC_FUN_MAP_BORROW_BACK,
-        INTRINSIC_FUN_MAP_BORROW_FRONT, INTRINSIC_FUN_MAP_BORROW_MUT,
-        INTRINSIC_FUN_MAP_BORROW_MUT_WITH_DEFAULT, INTRINSIC_FUN_MAP_BORROW_WITH_DEFAULT,
-        INTRINSIC_FUN_MAP_DEL_MUST_EXIST, INTRINSIC_FUN_MAP_DEL_RETURN_KEY,
-        INTRINSIC_FUN_MAP_DESTROY_EMPTY, INTRINSIC_FUN_MAP_GET, INTRINSIC_FUN_MAP_HAS_KEY,
+        INTRINSIC_FUN_MAP_APPEND_DISJOINT, INTRINSIC_FUN_MAP_BACK_KEY, INTRINSIC_FUN_MAP_BORROW,
+        INTRINSIC_FUN_MAP_BORROW_BACK, INTRINSIC_FUN_MAP_BORROW_FRONT,
+        INTRINSIC_FUN_MAP_BORROW_MUT, INTRINSIC_FUN_MAP_BORROW_MUT_WITH_DEFAULT,
+        INTRINSIC_FUN_MAP_BORROW_WITH_DEFAULT, INTRINSIC_FUN_MAP_DEL_MUST_EXIST,
+        INTRINSIC_FUN_MAP_DEL_RETURN_KEY, INTRINSIC_FUN_MAP_DESTROY_EMPTY,
+        INTRINSIC_FUN_MAP_FRONT_KEY, INTRINSIC_FUN_MAP_GET, INTRINSIC_FUN_MAP_HAS_KEY,
         INTRINSIC_FUN_MAP_IS_EMPTY, INTRINSIC_FUN_MAP_KEYS, INTRINSIC_FUN_MAP_LEN,
-        INTRINSIC_FUN_MAP_NEW, INTRINSIC_FUN_MAP_NEW_FROM, INTRINSIC_FUN_MAP_NEXT_KEY,
-        INTRINSIC_FUN_MAP_POP_BACK, INTRINSIC_FUN_MAP_POP_FRONT, INTRINSIC_FUN_MAP_PREV_KEY,
-        INTRINSIC_FUN_MAP_REMOVE_OR_NONE, INTRINSIC_FUN_MAP_REPLACE_KEY_INPLACE,
-        INTRINSIC_FUN_MAP_SPEC_ABORTS_ADD, INTRINSIC_FUN_MAP_SPEC_ABORTS_BORROW,
-        INTRINSIC_FUN_MAP_SPEC_ABORTS_DEL, INTRINSIC_FUN_MAP_SPEC_ABORTS_DESTROY_EMPTY,
-        INTRINSIC_FUN_MAP_SPEC_DEL, INTRINSIC_FUN_MAP_SPEC_GET, INTRINSIC_FUN_MAP_SPEC_HAS_KEY,
+        INTRINSIC_FUN_MAP_NEW, INTRINSIC_FUN_MAP_NEW_FROM, INTRINSIC_FUN_MAP_NEW_WITH_CONFIG,
+        INTRINSIC_FUN_MAP_NEXT_KEY, INTRINSIC_FUN_MAP_POP_BACK, INTRINSIC_FUN_MAP_POP_FRONT,
+        INTRINSIC_FUN_MAP_PREV_KEY, INTRINSIC_FUN_MAP_REMOVE_OR_NONE,
+        INTRINSIC_FUN_MAP_REPLACE_KEY_INPLACE, INTRINSIC_FUN_MAP_SPEC_ABORTS_ADD,
+        INTRINSIC_FUN_MAP_SPEC_ABORTS_BORROW, INTRINSIC_FUN_MAP_SPEC_ABORTS_DEL,
+        INTRINSIC_FUN_MAP_SPEC_ABORTS_DESTROY_EMPTY, INTRINSIC_FUN_MAP_SPEC_DEL,
+        INTRINSIC_FUN_MAP_SPEC_GET, INTRINSIC_FUN_MAP_SPEC_HAS_KEY,
         INTRINSIC_FUN_MAP_SPEC_IS_EMPTY, INTRINSIC_FUN_MAP_SPEC_LEN, INTRINSIC_FUN_MAP_SPEC_NEW,
-        INTRINSIC_FUN_MAP_SPEC_SET, INTRINSIC_FUN_MAP_TO_VEC_PAIR, INTRINSIC_FUN_MAP_TRIM,
-        INTRINSIC_FUN_MAP_UPSERT, INTRINSIC_FUN_MAP_UPSERT_ALL, INTRINSIC_FUN_MAP_VALUES,
+        INTRINSIC_FUN_MAP_SPEC_SET, INTRINSIC_FUN_MAP_TO_ORDERED_MAP,
+        INTRINSIC_FUN_MAP_TO_VEC_PAIR, INTRINSIC_FUN_MAP_TRIM, INTRINSIC_FUN_MAP_UPSERT,
+        INTRINSIC_FUN_MAP_UPSERT_ALL, INTRINSIC_FUN_MAP_VALUES,
     },
     ty::{PrimitiveType, Type},
 };
@@ -103,6 +106,7 @@ struct MapImpl {
     insts: Vec<(TypeInfo, TypeInfo)>,
     // move functions
     fun_new: String,
+    fun_new_with_config: String,
     fun_destroy_empty: String,
     fun_len: String,
     fun_is_empty: String,
@@ -120,11 +124,14 @@ struct MapImpl {
     fun_get: String,
     fun_borrow_front: String,
     fun_borrow_back: String,
+    fun_front_key: String,
+    fun_back_key: String,
     fun_pop_front: String,
     fun_pop_back: String,
     fun_prev_key: String,
     fun_next_key: String,
     fun_keys: String,
+    fun_to_ordered_map: String,
     fun_values: String,
     fun_to_vec_pair: String,
     fun_new_from: String,
@@ -235,6 +242,16 @@ pub fn add_prelude(
         bv_instances = vec![];
     }
 
+    // Signed integers are always Boogie `int`; they have no bv rendering. A bv
+    // rendering recurses into contained types (vector elements, type arguments),
+    // so a type is bv-renderable only when its whole containment closure is free
+    // of signed ints.
+    let contains_signed_int = |ty: &Type| {
+        ty.get_all_contained_types_with_skip_reference(env)
+            .iter()
+            .any(|t| t.is_signed_int())
+    };
+
     let mut all_types = mono_info
         .all_types
         .iter()
@@ -246,7 +263,7 @@ pub fn add_prelude(
     let mut bv_all_types = mono_info
         .all_types
         .iter()
-        .filter(|ty| ty.can_be_type_argument() && !ty.is_signed_int())
+        .filter(|ty| ty.can_be_type_argument() && !contains_signed_int(ty))
         .map(|ty| TypeInfo::new(env, options, ty, true))
         .filter(|ty_info| !all_types.contains(ty_info))
         .collect::<BTreeSet<_>>()
@@ -290,9 +307,12 @@ pub fn add_prelude(
         .collect_vec();
     // If not using cvc5, generate vector functions for bv types
     if !options.use_cvc5 {
+        // Exclude signed-containing element/value types from bv twins (same
+        // guard as `bv_all_types` above).
         let mut bv_vec_instances = mono_info
             .vec_inst
             .iter()
+            .filter(|ty| !contains_signed_int(ty))
             .map(|ty| TypeInfo::new(env, options, ty, true))
             .filter(|ty_info| !vec_instances.contains(ty_info))
             .collect::<BTreeSet<_>>()
@@ -303,7 +323,9 @@ pub fn add_prelude(
             .iter()
             .map(|(qid, ty_args)| {
                 let v_ty = ty_args.iter().map(|(_, vty)| vty).collect_vec();
-                let bv_flag = v_ty.iter().all(|ty| ty.skip_reference().is_number());
+                let bv_flag = v_ty.iter().all(|ty| {
+                    ty.skip_reference().is_number() && !ty.skip_reference().is_signed_int()
+                });
                 MapImpl::new(env, options, *qid, ty_args, bv_flag)
             })
             .filter(|map_impl| !table_instances.contains(map_impl))
@@ -382,6 +404,9 @@ pub fn add_prelude(
                 insts.iter().map(|inst| {
                     inst.iter()
                         .flat_map(|i| i.get_all_contained_types_with_skip_reference(env))
+                        // Skip signed-containing types in the bv pass (same guard
+                        // as `bv_all_types` above).
+                        .filter(|i| !bv_flag || !contains_signed_int(i))
                         .map(|i| (i.clone(), TypeInfo::new(env, options, &i, bv_flag)))
                         .collect::<Vec<_>>()
                 })
@@ -545,6 +570,10 @@ impl MapImpl {
             struct_name,
             insts,
             fun_new: Self::triple_opt_to_name(env, decl.get_fun_triple(env, INTRINSIC_FUN_MAP_NEW)),
+            fun_new_with_config: Self::triple_opt_to_name(
+                env,
+                decl.get_fun_triple(env, INTRINSIC_FUN_MAP_NEW_WITH_CONFIG),
+            ),
             fun_destroy_empty: Self::triple_opt_to_name(
                 env,
                 decl.get_fun_triple(env, INTRINSIC_FUN_MAP_DESTROY_EMPTY),
@@ -607,6 +636,14 @@ impl MapImpl {
                 env,
                 decl.get_fun_triple(env, INTRINSIC_FUN_MAP_BORROW_BACK),
             ),
+            fun_front_key: Self::triple_opt_to_name(
+                env,
+                decl.get_fun_triple(env, INTRINSIC_FUN_MAP_FRONT_KEY),
+            ),
+            fun_back_key: Self::triple_opt_to_name(
+                env,
+                decl.get_fun_triple(env, INTRINSIC_FUN_MAP_BACK_KEY),
+            ),
             fun_pop_front: Self::triple_opt_to_name(
                 env,
                 decl.get_fun_triple(env, INTRINSIC_FUN_MAP_POP_FRONT),
@@ -626,6 +663,10 @@ impl MapImpl {
             fun_keys: Self::triple_opt_to_name(
                 env,
                 decl.get_fun_triple(env, INTRINSIC_FUN_MAP_KEYS),
+            ),
+            fun_to_ordered_map: Self::triple_opt_to_name(
+                env,
+                decl.get_fun_triple(env, INTRINSIC_FUN_MAP_TO_ORDERED_MAP),
             ),
             fun_values: Self::triple_opt_to_name(
                 env,

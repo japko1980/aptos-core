@@ -18,16 +18,18 @@ use move_model::{
         SpecVarId, StructEnv, StructId,
     },
     pragmas::{
-        INTRINSIC_FUN_MAP_BORROW_BACK, INTRINSIC_FUN_MAP_BORROW_FRONT, INTRINSIC_FUN_MAP_GET,
-        INTRINSIC_FUN_MAP_KEYS, INTRINSIC_FUN_MAP_NEW_FROM, INTRINSIC_FUN_MAP_NEXT_KEY,
-        INTRINSIC_FUN_MAP_POP_BACK, INTRINSIC_FUN_MAP_POP_FRONT, INTRINSIC_FUN_MAP_PREV_KEY,
-        INTRINSIC_FUN_MAP_REMOVE_OR_NONE, INTRINSIC_FUN_MAP_SPEC_ABORTS_ADD,
-        INTRINSIC_FUN_MAP_SPEC_ABORTS_ADD_ALL, INTRINSIC_FUN_MAP_SPEC_ABORTS_APPEND_DISJOINT,
-        INTRINSIC_FUN_MAP_SPEC_ABORTS_BORROW, INTRINSIC_FUN_MAP_SPEC_ABORTS_DEL,
-        INTRINSIC_FUN_MAP_SPEC_ABORTS_DESTROY_EMPTY, INTRINSIC_FUN_MAP_SPEC_ABORTS_EMPTY,
-        INTRINSIC_FUN_MAP_SPEC_ABORTS_NEW_FROM, INTRINSIC_FUN_MAP_SPEC_ABORTS_REPLACE_KEY_INPLACE,
-        INTRINSIC_FUN_MAP_SPEC_ABORTS_TRIM, INTRINSIC_FUN_MAP_SPEC_ABORTS_UPSERT_ALL,
-        INTRINSIC_FUN_MAP_TO_VEC_PAIR, INTRINSIC_FUN_MAP_UPSERT, INTRINSIC_TYPE_MAP,
+        INTRINSIC_FUN_MAP_BACK_KEY, INTRINSIC_FUN_MAP_BORROW_BACK, INTRINSIC_FUN_MAP_BORROW_FRONT,
+        INTRINSIC_FUN_MAP_FRONT_KEY, INTRINSIC_FUN_MAP_GET, INTRINSIC_FUN_MAP_KEYS,
+        INTRINSIC_FUN_MAP_NEW_FROM, INTRINSIC_FUN_MAP_NEXT_KEY, INTRINSIC_FUN_MAP_POP_BACK,
+        INTRINSIC_FUN_MAP_POP_FRONT, INTRINSIC_FUN_MAP_PREV_KEY, INTRINSIC_FUN_MAP_REMOVE_OR_NONE,
+        INTRINSIC_FUN_MAP_SPEC_ABORTS_ADD, INTRINSIC_FUN_MAP_SPEC_ABORTS_ADD_ALL,
+        INTRINSIC_FUN_MAP_SPEC_ABORTS_APPEND_DISJOINT, INTRINSIC_FUN_MAP_SPEC_ABORTS_BORROW,
+        INTRINSIC_FUN_MAP_SPEC_ABORTS_DEL, INTRINSIC_FUN_MAP_SPEC_ABORTS_DESTROY_EMPTY,
+        INTRINSIC_FUN_MAP_SPEC_ABORTS_EMPTY, INTRINSIC_FUN_MAP_SPEC_ABORTS_NEW_FROM,
+        INTRINSIC_FUN_MAP_SPEC_ABORTS_NEW_WITH_CONFIG,
+        INTRINSIC_FUN_MAP_SPEC_ABORTS_REPLACE_KEY_INPLACE, INTRINSIC_FUN_MAP_SPEC_ABORTS_TRIM,
+        INTRINSIC_FUN_MAP_SPEC_ABORTS_UPSERT_ALL, INTRINSIC_FUN_MAP_TO_VEC_PAIR,
+        INTRINSIC_FUN_MAP_UPSERT, INTRINSIC_TYPE_MAP,
     },
     symbol::Symbol,
     ty::{NoUnificationContext, Type, TypeDisplayContext, Variance},
@@ -327,6 +329,8 @@ impl Analyzer<'_> {
         let cmp_k_roles = [
             INTRINSIC_FUN_MAP_BORROW_FRONT,
             INTRINSIC_FUN_MAP_BORROW_BACK,
+            INTRINSIC_FUN_MAP_FRONT_KEY,
+            INTRINSIC_FUN_MAP_BACK_KEY,
             INTRINSIC_FUN_MAP_POP_FRONT,
             INTRINSIC_FUN_MAP_POP_BACK,
             INTRINSIC_FUN_MAP_PREV_KEY,
@@ -344,6 +348,7 @@ impl Analyzer<'_> {
             INTRINSIC_FUN_MAP_SPEC_ABORTS_EMPTY,
             INTRINSIC_FUN_MAP_SPEC_ABORTS_ADD_ALL,
             INTRINSIC_FUN_MAP_SPEC_ABORTS_NEW_FROM,
+            INTRINSIC_FUN_MAP_SPEC_ABORTS_NEW_WITH_CONFIG,
             INTRINSIC_FUN_MAP_SPEC_ABORTS_APPEND_DISJOINT,
             INTRINSIC_FUN_MAP_SPEC_ABORTS_TRIM,
             INTRINSIC_FUN_MAP_SPEC_ABORTS_UPSERT_ALL,
@@ -412,21 +417,38 @@ impl Analyzer<'_> {
                     spec_fun_to_register.push((spec_fun_qid, vec![k.clone(), v.clone()]));
                 }
             }
-            // The backend sets `cmp_available` for K from ALL `cmp::compare<K>`
-            // instances in `native_inst[cmp]` — including direct user calls that
-            // never went through an ordering role. When prev_key/next_key are
-            // bound, their templates then emit referencing `Option<K>`, so it
-            // must be registered for those K's too.
-            if let Some(cmp_mid) = cmp_mid {
+        }
+        // The backend marks a map's K as `cmp_available` when K appears in the
+        // *contained-type closure* of any `cmp::compare` instance (the prelude
+        // expands `native_inst[cmp]` with `get_all_contained_types_with_skip_reference`
+        // because `compare` recurses into fields) — including instances this pass
+        // itself adds for ordering roles, and direct user calls that never went
+        // through an ordering role. The prev_key/next_key templates emit for every
+        // cmp-available K and reference `Option<K>`, so mirror that closure here.
+        if let Some(cmp_mid) = cmp_mid {
+            let mut cmp_closure: BTreeSet<Type> = BTreeSet::new();
+            let existing_cmp_ks = self
+                .info
+                .native_inst
+                .get(&cmp_mid)
+                .into_iter()
+                .flatten()
+                .filter_map(|inst| inst.first().cloned())
+                .collect::<Vec<_>>();
+            for ty in existing_cmp_ks.iter().chain(cmp_k_to_register.iter()) {
+                cmp_closure.extend(ty.get_all_contained_types_with_skip_reference(self.env));
+            }
+            for (struct_qid, ty_args) in self.info.table_inst.iter() {
+                let Some(decl) = intrinsics.get_decl_for_struct(struct_qid) else {
+                    continue;
+                };
                 let prev_next_bound = [INTRINSIC_FUN_MAP_PREV_KEY, INTRINSIC_FUN_MAP_NEXT_KEY]
                     .iter()
                     .any(|name| decl.get_fun_triple(self.env, name).is_some());
                 if prev_next_bound {
-                    if let Some(cmp_actuals) = self.info.native_inst.get(&cmp_mid) {
-                        for (k, _v) in ty_args.iter() {
-                            if cmp_actuals.contains(&vec![k.clone()]) {
-                                option_k_to_register.push(k.clone());
-                            }
+                    for (k, _v) in ty_args.iter() {
+                        if cmp_closure.contains(k) {
+                            option_k_to_register.push(k.clone());
                         }
                     }
                 }
