@@ -24,10 +24,10 @@
 //! — these arms charge only the shallow byte move.
 
 use crate::{
+    error::{GasInstrumentationError, GasInstrumentationResult, LoweringResult},
     lower::context::concrete_type_size,
     stackless_exec_ir::{instr_utils::for_each_value_use, BasicBlock, Instr, ModuleIR, Slot},
 };
-use anyhow::{bail, Result};
 use mono_move_core::{
     types::{strip_ref, view_type, view_type_list, InternedType, InternedTypeList, Type},
     Interner, LayoutProvider, PreparedModule,
@@ -121,7 +121,10 @@ impl BlockCost {
 // =============================================================================
 
 /// Emit a per-block [`BlockCost`] formula for every function in `module_ir`.
-pub(crate) fn instrument<I: Interner>(module_ir: &mut ModuleIR, interner: &I) -> Result<()> {
+pub(crate) fn instrument<I: Interner>(
+    module_ir: &mut ModuleIR,
+    interner: &I,
+) -> GasInstrumentationResult<()> {
     let ModuleIR { module, functions } = module_ir;
     for func in functions.iter_mut().flatten() {
         let mut emitter = Emitter {
@@ -155,52 +158,60 @@ struct Emitter<'a, I: Interner> {
 impl<I: Interner> Emitter<'_, I> {
     /// Type of the value in `slot`. An Xfer slot read here always holds a prior
     /// call's return (call arguments are costed from the callee signature).
-    fn slot_ty(&self, slot: Slot) -> Result<InternedType> {
+    fn slot_ty(&self, slot: Slot) -> GasInstrumentationResult<InternedType> {
         match slot {
             Slot::Home(i) => Ok(self.home_slot_types[i as usize]),
-            Slot::Xfer(j) => self.xfer_ret_types[j as usize].ok_or_else(|| {
-                anyhow::anyhow!("Xfer({}) read without a prior call-return binding", j)
-            }),
-            Slot::Vid(i) => bail!("Vid({}) in post-allocation IR", i),
+            Slot::Xfer(j) => self.xfer_ret_types[j as usize]
+                .ok_or(GasInstrumentationError::XferReadWithoutBinding { xfer: j }),
+            Slot::Vid(_) => Err(GasInstrumentationError::VidInPostAllocationIr),
         }
     }
 
     /// Pointee type of a reference slot (`ReadRef`/`WriteRef` touch the pointee).
-    fn pointee_ty(&self, ref_slot: Slot) -> Result<InternedType> {
-        strip_ref(self.slot_ty(ref_slot)?)
+    fn pointee_ty(&self, ref_slot: Slot) -> GasInstrumentationResult<InternedType> {
+        strip_ref(self.slot_ty(ref_slot)?).ok_or(GasInstrumentationError::ExpectedReferenceType)
     }
 
     /// Type of struct field `fh`, with the owner nominal's type arguments applied.
-    fn field_ty(&self, owner: InternedType, fh: FieldHandleIndex) -> Result<InternedType> {
+    fn field_ty(
+        &self,
+        owner: InternedType,
+        fh: FieldHandleIndex,
+    ) -> GasInstrumentationResult<InternedType> {
         let Type::Nominal { ty_args, .. } = view_type(owner) else {
-            bail!("field owner is not a struct type");
+            return Err(GasInstrumentationError::FieldOwnerNotStruct);
         };
-        self.interner
-            .subst_type(self.module.interned_field_type_at(fh), *ty_args)
+        Ok(self
+            .interner
+            .subst_type(self.module.interned_field_type_at(fh), *ty_args)?)
     }
 
     /// Field types of enum `enum_ty`'s variant `variant`, with the enum's type
     /// arguments applied.
-    fn variant_field_tys(&self, enum_ty: InternedType, variant: u16) -> Result<Vec<InternedType>> {
+    fn variant_field_tys(
+        &self,
+        enum_ty: InternedType,
+        variant: u16,
+    ) -> GasInstrumentationResult<Vec<InternedType>> {
         let Type::Nominal { name, ty_args, .. } = view_type(enum_ty) else {
-            bail!("variant owner is not an enum type");
+            return Err(GasInstrumentationError::VariantOwnerNotEnum);
         };
         let def_idx = self
             .module
             .interned_nominal_type_def_idx(*name)
-            .ok_or_else(|| anyhow::anyhow!("enum definition not found"))?;
+            .ok_or(GasInstrumentationError::EnumDefinitionNotFound)?;
         let fields = self
             .module
             .interned_variant_field_types_at(def_idx, variant)
-            .ok_or_else(|| anyhow::anyhow!("type is not an enum"))?;
-        fields
+            .ok_or(GasInstrumentationError::NotAnEnum)?;
+        Ok(fields
             .iter()
             .map(|&f| self.interner.subst_type(f, *ty_args))
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Cost of the formula for one block, resetting Xfer tracking at its start.
-    fn block_cost(&mut self, block: &BasicBlock) -> Result<BlockCost> {
+    fn block_cost(&mut self, block: &BasicBlock) -> GasInstrumentationResult<BlockCost> {
         // Xfer slots are block-local.
         self.xfer_ret_types.fill(None);
         let mut b = BlockCost::zero();
@@ -225,7 +236,7 @@ impl<I: Interner> Emitter<'_, I> {
     }
 
     /// Emit the cost of `instr` into `b`.
-    fn instr_cost(&mut self, b: &mut BlockCost, instr: &Instr) -> Result<()> {
+    fn instr_cost(&mut self, b: &mut BlockCost, instr: &Instr) -> GasInstrumentationResult<()> {
         match instr {
             // --- Loads ---
             Instr::LdConst(..)
@@ -382,7 +393,7 @@ impl<I: Interner> Emitter<'_, I> {
         param_types: InternedTypeList,
         ret_slots: &[Slot],
         ret_types: InternedTypeList,
-    ) -> Result<()> {
+    ) -> GasInstrumentationResult<()> {
         b.add_constant(CALL);
         for &param in view_type_list(param_types) {
             b.add_sized(MOVE_BASE, MOVE_PER_BYTE, param);
@@ -395,7 +406,7 @@ impl<I: Interner> Emitter<'_, I> {
                 Slot::Home(i) => {
                     b.add_sized(MOVE_BASE, MOVE_PER_BYTE, self.home_slot_types[i as usize])
                 },
-                Slot::Vid(_) => bail!("Vid slot in post-allocation IR"),
+                Slot::Vid(_) => return Err(GasInstrumentationError::VidInPostAllocationIr),
             }
         }
         self.bind_call_returns(ret_slots, ret_types)?;
@@ -403,14 +414,18 @@ impl<I: Interner> Emitter<'_, I> {
     }
 
     /// Clobber all Xfer slots, then bind each Xfer return to its callee type.
-    fn bind_call_returns(&mut self, ret_slots: &[Slot], ret_types: InternedTypeList) -> Result<()> {
+    fn bind_call_returns(
+        &mut self,
+        ret_slots: &[Slot],
+        ret_types: InternedTypeList,
+    ) -> GasInstrumentationResult<()> {
         self.xfer_ret_types.fill(None);
         let ret_types = view_type_list(ret_types);
         for (k, ret) in ret_slots.iter().enumerate() {
             if let Slot::Xfer(j) = *ret {
-                let ty = *ret_types.get(k).ok_or_else(|| {
-                    anyhow::anyhow!("call return {} has no matching signature type", k)
-                })?;
+                let ty = *ret_types
+                    .get(k)
+                    .ok_or(GasInstrumentationError::CallReturnNoSignatureType { ret_idx: k })?;
                 self.xfer_ret_types[j as usize] = Some(ty);
             }
         }
@@ -422,14 +437,14 @@ impl<I: Interner> Emitter<'_, I> {
 /// leading `Function` type of a `CallClosure` signature.
 fn closure_signature(
     sig_types: InternedTypeList,
-) -> Result<(InternedType, InternedTypeList, InternedTypeList)> {
+) -> GasInstrumentationResult<(InternedType, InternedTypeList, InternedTypeList)> {
     let closure_ty = view_type_list(sig_types)
         .first()
         .copied()
-        .ok_or_else(|| anyhow::anyhow!("CallClosure signature is empty"))?;
+        .ok_or(GasInstrumentationError::ClosureSignatureEmpty)?;
     match view_type(closure_ty) {
         Type::Function { args, results, .. } => Ok((closure_ty, *args, *results)),
-        _ => bail!("CallClosure signature must start with a Function type"),
+        _ => Err(GasInstrumentationError::ClosureSignatureNotFunction),
     }
 }
 
@@ -440,13 +455,13 @@ fn closure_signature(
 /// Resolves the types in a [`BlockCost`] to concrete sizes for an instantiation.
 pub(crate) trait CostResolver {
     /// Substitute the instantiation's type arguments into `ty`.
-    fn concrete_ty(&self, ty: InternedType) -> Result<InternedType>;
+    fn concrete_ty(&self, ty: InternedType) -> LoweringResult<InternedType>;
 
     /// Value layouts, for reading concrete type sizes.
     fn layouts(&self) -> &dyn LayoutProvider;
 
     /// Evaluate a block's cost formula to concrete gas for this instantiation.
-    fn resolve_block_cost(&self, cost: &BlockCost) -> Result<u64> {
+    fn resolve_block_cost(&self, cost: &BlockCost) -> LoweringResult<u64> {
         let mut total = cost.base;
         for &(coeff, ty) in &cost.terms {
             let concrete_ty = self.concrete_ty(ty)?;

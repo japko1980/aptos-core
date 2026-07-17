@@ -13,13 +13,13 @@ use super::{
     parallel_copy,
 };
 use crate::{
+    error::{LoweringError, LoweringResult},
     gas::{self, CostResolver},
     stackless_exec_ir::{
         instr_utils::{clobbers_xfer, for_each_value_use, is_fallthrough_terminator},
         BinaryOp, FunctionIR, ImmValue, Instr, Label, Slot, UnaryOp,
     },
 };
-use anyhow::{anyhow, bail, Context, Result};
 use mono_move_core::{
     native::{FrameSlot, NativeABI},
     types::{is_closed_type, strip_ref, view_type, view_type_list, InternedType, Type},
@@ -37,15 +37,14 @@ use move_binary_format::file_format::{
 /// returns them as a fixed array. Fixed-width integers and `address` encode
 /// with no length prefix, so these bytes are already the in-memory
 /// representation the matching `StoreImm` expects.
-fn const_imm<const N: usize>(idx: ConstantPoolIndex, bytes: &[u8]) -> Result<[u8; N]> {
-    bytes.try_into().map_err(|_| {
-        anyhow!(
-            "LdConst at constant pool index {}: expected {}-byte constant data, got {}",
-            idx.0,
-            N,
-            bytes.len()
-        )
-    })
+fn const_imm<const N: usize>(idx: ConstantPoolIndex, bytes: &[u8]) -> LoweringResult<[u8; N]> {
+    bytes
+        .try_into()
+        .map_err(|_| LoweringError::LdConstBadLength {
+            idx: idx.0,
+            expected: N,
+            got: bytes.len(),
+        })
 }
 
 /// Temporary result of lowering a function to micro-ops.
@@ -67,7 +66,7 @@ const ENUM_PTR_SIZE: u32 = 8;
 pub(super) fn lower_function(
     func_ir: &FunctionIR,
     ctx: &LoweringContext,
-) -> Result<LoweredFunction> {
+) -> LoweringResult<LoweredFunction> {
     let mut state = LoweringState::new(func_ir, ctx);
     for (block_idx, block) in func_ir.blocks.iter().enumerate() {
         // Xfer slots are block-local.
@@ -92,9 +91,10 @@ pub(super) fn lower_function(
         // order) on its fixup, so `fixup_branches` can write that block's cost
         // into the jump's `gas_fallthrough`.
         if block.instrs.last().is_some_and(is_fallthrough_terminator) {
-            let fallthrough = func_ir.blocks.get(block_idx + 1).ok_or_else(|| {
-                anyhow::anyhow!("conditional terminator in final block has no fallthrough block")
-            })?;
+            let fallthrough = func_ir
+                .blocks
+                .get(block_idx + 1)
+                .ok_or(LoweringError::FinalBlockNoFallthrough)?;
             let fixup = state
                 .branch_fixups
                 .last_mut()
@@ -171,7 +171,7 @@ struct LoweringState<'a> {
 }
 
 impl gas::CostResolver for LoweringState<'_> {
-    fn concrete_ty(&self, ty: InternedType) -> Result<InternedType> {
+    fn concrete_ty(&self, ty: InternedType) -> LoweringResult<InternedType> {
         LoweringState::concrete_ty(self, ty)
     }
 
@@ -201,7 +201,7 @@ impl<'a> LoweringState<'a> {
 
     /// Substitutes the instantiation's type arguments into `ty`, producing a
     /// closed type; identity when `ty_args` is empty.
-    fn concrete_ty(&self, ty: InternedType) -> Result<InternedType> {
+    fn concrete_ty(&self, ty: InternedType) -> LoweringResult<InternedType> {
         let ty = self.ctx.interner.subst_type(ty, self.ctx.ty_args)?;
         debug_assert!(
             is_closed_type(ty),
@@ -217,23 +217,24 @@ impl<'a> LoweringState<'a> {
     fn struct_field_layouts(
         &self,
         struct_ty: InternedType,
-        op: &str,
-    ) -> Result<Vec<(u32, u32, u32)>> {
+        op: &'static str,
+    ) -> LoweringResult<Vec<(u32, u32, u32)>> {
         let layout = self
             .ctx
             .layouts
             .layout_by_ty(struct_ty)
-            .ok_or_else(|| anyhow::anyhow!("{}: struct type has no populated layout", op))?;
+            .ok_or(LoweringError::StructLayoutNotPopulated { op })?;
         let LayoutKind::Struct { fields } = &layout.kind else {
-            bail!("{}: nominal type is not a struct (no field layouts)", op);
+            return Err(LoweringError::NominalTypeNotStruct { op });
         };
         fields
             .iter()
             .map(|f| {
-                let child =
-                    self.ctx.layouts.layout(f.id).ok_or_else(|| {
-                        anyhow::anyhow!("{}: field layout id does not resolve", op)
-                    })?;
+                let child = self
+                    .ctx
+                    .layouts
+                    .layout(f.id)
+                    .ok_or(LoweringError::FieldLayoutIdUnresolved { op })?;
                 Ok((f.offset, child.size, child.align))
             })
             .collect()
@@ -241,12 +242,16 @@ impl<'a> LoweringState<'a> {
 
     /// Resolve a `FieldHandleIndex` against the struct type `struct_ty`
     /// and return `(field_byte_offset, field_byte_size)`.
-    fn resolve_field(&self, struct_ty: InternedType, fh: FieldHandleIndex) -> Result<(u32, u32)> {
+    fn resolve_field(
+        &self,
+        struct_ty: InternedType,
+        fh: FieldHandleIndex,
+    ) -> LoweringResult<(u32, u32)> {
         let fields = self.struct_field_layouts(struct_ty, "field access")?;
         let pos = self.ctx.module.field_position_at(fh) as usize;
         let (offset, size, _align) = *fields
             .get(pos)
-            .ok_or_else(|| anyhow::anyhow!("field index {} out of range for struct", pos))?;
+            .ok_or(LoweringError::FieldIndexOutOfRange { pos })?;
         Ok((offset, size))
     }
 
@@ -256,7 +261,7 @@ impl<'a> LoweringState<'a> {
         &self,
         enum_ty: InternedType,
         vfh: VariantFieldHandleIndex,
-    ) -> Result<VariantFieldAccess> {
+    ) -> LoweringResult<VariantFieldAccess> {
         resolve_variant_field_access(self.ctx.module, &self.ctx.enum_layouts, enum_ty, vfh)
     }
 
@@ -269,7 +274,7 @@ impl<'a> LoweringState<'a> {
         access: &VariantFieldAccess,
         enum_ref: FrameOffset,
         dst_ref: FrameOffset,
-    ) -> Result<()> {
+    ) -> LoweringResult<()> {
         match access.uniform_offset {
             Some(offset) => self.emit(MicroOp::enum_borrow(enum_ref, offset, dst_ref))?,
             None => self.emit(MicroOp::enum_borrow_variant_field(
@@ -281,28 +286,27 @@ impl<'a> LoweringState<'a> {
         Ok(())
     }
 
-    fn xfer_binding(&self, j: u16) -> Result<TypedSlot> {
-        self.xfer_bindings[j as usize]
-            .with_context(|| format!("Xfer({}) read without a prior def in this block", j))
+    fn xfer_binding(&self, j: u16) -> LoweringResult<TypedSlot> {
+        self.xfer_bindings[j as usize].ok_or(LoweringError::XferReadWithoutDef { xfer: j })
     }
 
-    fn slot(&self, slot: Slot) -> Result<SizedSlot> {
+    fn slot(&self, slot: Slot) -> LoweringResult<SizedSlot> {
         Ok(match slot {
             Slot::Home(i) => self.ctx.home_slots[i as usize],
             Slot::Xfer(j) => self.xfer_binding(j)?.slot,
-            Slot::Vid(i) => bail!("Vid({}) in post-allocation IR", i),
+            Slot::Vid(_) => return Err(LoweringError::VidInPostAllocationIr),
         })
     }
 
     /// Returns sized layout info for a destination slot.
-    fn def_slot(&mut self, slot: Slot) -> Result<SizedSlot> {
+    fn def_slot(&mut self, slot: Slot) -> LoweringResult<SizedSlot> {
         Ok(self.def_typed_slot(slot)?.slot)
     }
 
     /// Resolves a destination slot to its sized layout and value type. For
     /// `Slot::Xfer(j)`, stages a pending binding to arg position `j` of the
     /// upcoming call. Errors for `Slot::Vid`.
-    fn def_typed_slot(&mut self, slot: Slot) -> Result<TypedSlot> {
+    fn def_typed_slot(&mut self, slot: Slot) -> LoweringResult<TypedSlot> {
         Ok(match slot {
             Slot::Home(i) => TypedSlot {
                 slot: self.ctx.home_slots[i as usize],
@@ -314,19 +318,19 @@ impl<'a> LoweringState<'a> {
                 self.pending_def_binds.push((j, typed_slot));
                 typed_slot
             },
-            Slot::Vid(i) => bail!("Vid({}) in post-allocation IR", i),
+            Slot::Vid(_) => return Err(LoweringError::VidInPostAllocationIr),
         })
     }
 
     /// Resolves each `slot` to its [`SizedSlot`] frame layout.
-    fn slots_to_sized_slots(&self, slots: &[Slot]) -> Result<Vec<SizedSlot>> {
+    fn slots_to_sized_slots(&self, slots: &[Slot]) -> LoweringResult<Vec<SizedSlot>> {
         slots.iter().map(|slot| self.slot(*slot)).collect()
     }
 
     /// Place a call's return values; `ret_slots` are their caller-frame
     /// locations. The call clobbers the whole callee region, so clear all Xfer
     /// bindings, then re-bind each `Xfer` ret (for GC) and copy each `Home` in.
-    fn bind_call_returns(&mut self, rets: &[Slot], ret_slots: &[TypedSlot]) -> Result<()> {
+    fn bind_call_returns(&mut self, rets: &[Slot], ret_slots: &[TypedSlot]) -> LoweringResult<()> {
         self.xfer_bindings.fill(None);
         for (k, ret_slot) in rets.iter().enumerate() {
             match *ret_slot {
@@ -338,7 +342,7 @@ impl<'a> LoweringState<'a> {
                     let dst = self.ctx.home_slots[i as usize];
                     self.emit_single_move(dst.offset, src)?;
                 },
-                Slot::Vid(_) => bail!("Vid slot in post-allocation IR"),
+                Slot::Vid(_) => return Err(LoweringError::VidInPostAllocationIr),
             }
         }
         Ok(())
@@ -348,17 +352,12 @@ impl<'a> LoweringState<'a> {
     /// also emit a paired `SafePointEntry` whose `code_offset` is
     /// `op`'s index in the buffer and whose `heap_ptr_offsets`
     /// are derived from the current `xfer_bindings`.
-    fn emit(&mut self, op: MicroOp) -> Result<()> {
+    fn emit(&mut self, op: MicroOp) -> LoweringResult<()> {
         if op.is_allocating() {
             let code_offset = CodeOffset(self.out_buf.len() as u32);
             let mut heap_ptr_offsets = Vec::with_capacity(self.xfer_bindings.len());
             for ts in self.xfer_bindings.iter().flatten() {
-                let rels = type_pointer_offsets(self.ctx.layouts, ts.ty).with_context(|| {
-                    format!(
-                        "deriving safe-point heap pointer offsets at code_offset {}",
-                        code_offset.0
-                    )
-                })?;
+                let rels = type_pointer_offsets(self.ctx.layouts, ts.ty)?;
                 heap_ptr_offsets
                     .extend(rels.into_iter().map(|r| FrameOffset(ts.slot.offset.0 + r)));
             }
@@ -391,7 +390,7 @@ impl<'a> LoweringState<'a> {
         heap_ptr: FrameOffset,
         src: FrameOffset,
         size: u32,
-    ) -> Result<()> {
+    ) -> LoweringResult<()> {
         if size == 8 {
             self.emit(MicroOp::HeapMoveTo8 {
                 heap_ptr,
@@ -416,7 +415,7 @@ impl<'a> LoweringState<'a> {
         dst: FrameOffset,
         heap_ptr: FrameOffset,
         size: u32,
-    ) -> Result<()> {
+    ) -> LoweringResult<()> {
         if size == 8 {
             self.emit(MicroOp::HeapMoveFrom8 {
                 dst,
@@ -436,28 +435,28 @@ impl<'a> LoweringState<'a> {
 
     /// `DescriptorId` published for `vec_ty`, with the shared diagnostic of
     /// the allocating vector ops. `op_name` prefixes the error message.
-    fn vector_descriptor_id(&self, op_name: &str, vec_ty: InternedType) -> Result<DescriptorId> {
-        self.ctx.descriptor_id(vec_ty).ok_or_else(|| {
-            anyhow!(
-                "{}: no descriptor published for this vector type \
-                 (its element type may be generic or have unresolved layout)",
-                op_name
-            )
-        })
+    fn vector_descriptor_id(
+        &self,
+        op_name: &'static str,
+        vec_ty: InternedType,
+    ) -> LoweringResult<DescriptorId> {
+        self.ctx
+            .descriptor_id(vec_ty)
+            .ok_or(LoweringError::VectorTypeNoDescriptor { op: op_name })
     }
 
     /// Interned-type corresponding to `slot`.
-    fn slot_interned_type(&self, slot: Slot) -> Result<InternedType> {
+    fn slot_interned_type(&self, slot: Slot) -> LoweringResult<InternedType> {
         Ok(match slot {
             Slot::Home(i) => self.home_slot_types[i as usize],
             Slot::Xfer(j) => self.xfer_binding(j)?.ty,
-            Slot::Vid(i) => bail!("Vid({}) in post-allocation IR", i),
+            Slot::Vid(_) => return Err(LoweringError::VidInPostAllocationIr),
         })
     }
 
     /// Canonical [`Type`] variant of `slot`. Use [`Self::slot_interned_type`]
     /// when an interned pointer is needed instead.
-    fn slot_type(&self, slot: Slot) -> Result<&'static Type> {
+    fn slot_type(&self, slot: Slot) -> LoweringResult<&'static Type> {
         Ok(view_type(self.slot_interned_type(slot)?))
     }
 
@@ -469,7 +468,11 @@ impl<'a> LoweringState<'a> {
     /// reference is another reference); a value with no owned heap pointers
     /// (scalar, inline-scalar struct) needs nothing, keeping those hot paths a
     /// bare byte copy.
-    fn maybe_deep_copy(&mut self, dst_ty: InternedType, dst_off: FrameOffset) -> Result<()> {
+    fn maybe_deep_copy(
+        &mut self,
+        dst_ty: InternedType,
+        dst_off: FrameOffset,
+    ) -> LoweringResult<()> {
         if matches!(
             view_type(dst_ty),
             Type::ImmutRef { .. } | Type::MutRef { .. }
@@ -488,9 +491,9 @@ impl<'a> LoweringState<'a> {
 
     /// Emit an `IntCast` to `to` from `src` into `dst`. The source type comes
     /// from `src`'s slot type and the `to` type is supplied by the caller.
-    fn lower_cast(&mut self, dst: Slot, src: Slot, to: IntTy) -> Result<()> {
-        let from = IntTy::from_type(self.slot_type(src)?)
-            .ok_or_else(|| anyhow::anyhow!("cast source must be an integer type"))?;
+    fn lower_cast(&mut self, dst: Slot, src: Slot, to: IntTy) -> LoweringResult<()> {
+        let from =
+            IntTy::from_type(self.slot_type(src)?).ok_or(LoweringError::CastSourceNotInteger)?;
         let src_info = self.slot(src)?;
         let dst_info = self.def_slot(dst)?;
         self.emit(MicroOp::IntCast(IntCastOp {
@@ -502,14 +505,14 @@ impl<'a> LoweringState<'a> {
     }
 
     /// Size in bytes of `ref_slot`'s pointee.
-    fn ref_pointee_size(&self, ref_slot: Slot) -> Result<u32> {
+    fn ref_pointee_size(&self, ref_slot: Slot) -> LoweringResult<u32> {
         super::context::ref_pointee_size(self.ctx.layouts, self.slot_interned_type(ref_slot)?)
     }
 
     /// Emit one byte-copy from `src` to `dst_offset`. Caller is
     /// responsible for ensuring no other concurrent move clobbers the
     /// source bytes.
-    fn emit_single_move(&mut self, dst_offset: FrameOffset, src: SizedSlot) -> Result<()> {
+    fn emit_single_move(&mut self, dst_offset: FrameOffset, src: SizedSlot) -> LoweringResult<()> {
         if dst_offset == src.offset {
             return Ok(());
         }
@@ -535,7 +538,7 @@ impl<'a> LoweringState<'a> {
         dst: FrameOffset,
         lhs: FrameOffset,
         rhs: IntOperand,
-    ) -> Result<()> {
+    ) -> LoweringResult<()> {
         self.emit(MicroOp::IntCmp(IntCmpOp {
             op: cmp,
             dst,
@@ -552,7 +555,7 @@ impl<'a> LoweringState<'a> {
         cmp: CmpKind,
         lhs: FrameOffset,
         rhs: IntOperand,
-    ) -> Result<()> {
+    ) -> LoweringResult<()> {
         self.emit(MicroOp::JumpIntCmp(JumpIntCmpOp {
             target,
             op: cmp,
@@ -564,7 +567,7 @@ impl<'a> LoweringState<'a> {
     }
 
     /// Lower one IR instruction.
-    fn lower_instr(&mut self, func_ir: &FunctionIR, instr: &Instr) -> Result<()> {
+    fn lower_instr(&mut self, func_ir: &FunctionIR, instr: &Instr) -> LoweringResult<()> {
         match instr {
             // --- Loads ---
             Instr::LdU64(dst, v) => {
@@ -736,11 +739,9 @@ impl<'a> LoweringState<'a> {
                     | Type::MutRef { .. }
                     | Type::Nominal { .. }
                     | Type::Function { .. }
-                    | Type::TypeParam { .. } => bail!(
-                        "LdConst at constant pool index {}: constant type is not \
-                         permitted by the bytecode verifier",
-                        idx.0,
-                    ),
+                    | Type::TypeParam { .. } => {
+                        return Err(LoweringError::LdConstTypeNotPermitted { idx: idx.0 })
+                    },
                 }
             },
 
@@ -812,7 +813,7 @@ impl<'a> LoweringState<'a> {
                             if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor)
                                 && rhs.is_signed()
                             {
-                                bail!("BinaryOp {:?}: bitwise on a signed value is invalid", op);
+                                return Err(LoweringError::BitwiseOnSignedValue);
                             }
                             let binop = IntBinaryOp { dst, lhs, rhs };
                             self.emit(match op {
@@ -829,19 +830,14 @@ impl<'a> LoweringState<'a> {
                                 | BinaryOp::Cmp(_)
                                 | BinaryOp::Or
                                 | BinaryOp::And => {
-                                    bail!("internal: unexpected op in arith/bitwise arm")
+                                    return Err(LoweringError::UnexpectedOpInArithArm)
                                 },
                             })?;
                         },
                         BinaryOp::Shl | BinaryOp::Shr => {
                             let ty = IntTy::from_type(lhs_ty)
                                 .filter(|t| !t.is_signed())
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                        "BinaryOp {:?}: requires an unsigned non-u64 integer type",
-                                        op
-                                    )
-                                })?;
+                                .ok_or(LoweringError::ShiftRequiresUnsignedNonU64)?;
                             let shift_op = IntShiftOp {
                                 ty,
                                 dst,
@@ -861,7 +857,9 @@ impl<'a> LoweringState<'a> {
                                 | BinaryOp::BitXor
                                 | BinaryOp::Cmp(_)
                                 | BinaryOp::Or
-                                | BinaryOp::And => bail!("internal: unexpected op in shift arm"),
+                                | BinaryOp::And => {
+                                    return Err(LoweringError::UnexpectedOpInShiftArm)
+                                },
                             })?;
                         },
                         // Comparison produces a 1-byte boolean.
@@ -885,7 +883,8 @@ impl<'a> LoweringState<'a> {
                                     dst,
                                     lhs,
                                     rhs,
-                                    ty: strip_ref(lhs_interned)?,
+                                    ty: strip_ref(lhs_interned)
+                                        .ok_or(LoweringError::ExpectedReferenceType)?,
                                 }))?;
                             },
                         },
@@ -974,7 +973,7 @@ impl<'a> LoweringState<'a> {
                             if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor)
                                 && rhs.is_signed()
                             {
-                                bail!("BinaryOpImm {:?}: bitwise on a signed value is invalid", op,);
+                                return Err(LoweringError::BitwiseOnSignedValue);
                             }
                             let binop = IntBinaryOp { dst, lhs, rhs };
                             self.emit(match op {
@@ -991,19 +990,14 @@ impl<'a> LoweringState<'a> {
                                 | BinaryOp::Cmp(_)
                                 | BinaryOp::Or
                                 | BinaryOp::And => {
-                                    bail!("internal: unexpected op in arith/bitwise arm")
+                                    return Err(LoweringError::UnexpectedOpInArithArm)
                                 },
                             })?;
                         },
                         BinaryOp::Shl | BinaryOp::Shr => {
                             let ty = IntTy::from_type(src_ty)
                                 .filter(|t| !t.is_signed())
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                    "BinaryOpImm {:?}: requires an unsigned non-u64 integer type",
-                                    op
-                                )
-                                })?;
+                                .ok_or(LoweringError::ShiftRequiresUnsignedNonU64)?;
                             let shift_op = IntShiftOp {
                                 ty,
                                 dst,
@@ -1023,7 +1017,9 @@ impl<'a> LoweringState<'a> {
                                 | BinaryOp::BitXor
                                 | BinaryOp::Cmp(_)
                                 | BinaryOp::Or
-                                | BinaryOp::And => bail!("internal: unexpected op in shift arm"),
+                                | BinaryOp::And => {
+                                    return Err(LoweringError::UnexpectedOpInShiftArm)
+                                },
                             })?;
                         },
                         // Comparison against an immediate producing a 1-byte boolean.
@@ -1036,7 +1032,7 @@ impl<'a> LoweringState<'a> {
                         // yields `src`, the other value yields the constant `!identity`.
                         BinaryOp::And | BinaryOp::Or => {
                             let ImmValue::Bool(b) = imm else {
-                                bail!("BinaryOpImm {:?}: imm must be bool", op);
+                                return Err(LoweringError::ImmMustBeBool);
                             };
                             let identity = matches!(op, BinaryOp::And);
                             if *b == identity {
@@ -1059,9 +1055,7 @@ impl<'a> LoweringState<'a> {
                     let src_ty = self.slot_type(*src)?;
                     let signed_ty = IntTy::from_type(src_ty)
                         .filter(|t| t.is_signed())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("UnaryOp::Negate requires a signed integer type")
-                        })?;
+                        .ok_or(LoweringError::NegateRequiresSignedInt)?;
                     let src_info = self.slot(*src)?;
                     let dst_info = self.def_slot(*dst)?;
                     self.emit(MicroOp::IntNegate(IntNegateOp {
@@ -1229,7 +1223,8 @@ impl<'a> LoweringState<'a> {
                                 negate: eq_negate(*op)?,
                                 lhs: lhs_off,
                                 rhs: rhs_off,
-                                ty: strip_ref(lhs_interned)?,
+                                ty: strip_ref(lhs_interned)
+                                    .ok_or(LoweringError::ExpectedReferenceType)?,
                                 gas_taken: 0,
                                 gas_fallthrough: 0,
                             }))?;
@@ -1385,7 +1380,7 @@ impl<'a> LoweringState<'a> {
                     let srcs = elems
                         .iter()
                         .map(|elem| Ok(self.slot(*elem)?.offset))
-                        .collect::<Result<Vec<_>>>()?;
+                        .collect::<LoweringResult<Vec<_>>>()?;
                     self.emit(MicroOp::VecPack(Box::new(VecPackOp {
                         dst: dst_typed.slot.offset,
                         descriptor_id,
@@ -1407,7 +1402,7 @@ impl<'a> LoweringState<'a> {
                 let dst_offsets = dsts
                     .iter()
                     .map(|dst| Ok(self.def_slot(*dst)?.offset))
-                    .collect::<Result<Vec<_>>>()?;
+                    .collect::<LoweringResult<Vec<_>>>()?;
                 self.emit(MicroOp::VecUnpack(Box::new(VecUnpackOp {
                     src: src_info.offset,
                     elem_size,
@@ -1436,7 +1431,8 @@ impl<'a> LoweringState<'a> {
                     self.concrete_ty(*elem_ty)?,
                     "vector elem type",
                 )?;
-                let vec_ty = strip_ref(self.slot_interned_type(*vec_ref)?)?;
+                let vec_ty = strip_ref(self.slot_interned_type(*vec_ref)?)
+                    .ok_or(LoweringError::ExpectedReferenceType)?;
                 let descriptor_id = self.vector_descriptor_id("VecPushBack", vec_ty)?;
                 let vec_ref_info = self.slot(*vec_ref)?;
                 let val_info = self.slot(*val)?;
@@ -1546,17 +1542,17 @@ impl<'a> LoweringState<'a> {
                 // (offset, size, align) per field.
                 let field_layouts = self.struct_field_layouts(struct_ty, "Pack")?;
                 if field_layouts.len() != args.len() {
-                    bail!(
-                        "Pack: arg count {} does not match struct field count {}",
-                        args.len(),
-                        field_layouts.len()
-                    );
+                    return Err(LoweringError::FieldCountMismatch {
+                        op: "Pack",
+                        provided: args.len(),
+                        expected: field_layouts.len(),
+                    });
                 }
                 let dst_info = self.def_slot(*dst)?;
                 let arg_infos = args
                     .iter()
                     .map(|s| self.slot(*s))
-                    .collect::<Result<Vec<_>>>()?;
+                    .collect::<LoweringResult<Vec<_>>>()?;
                 let copies: Vec<_> = field_layouts
                     .iter()
                     .zip(arg_infos.iter())
@@ -1572,7 +1568,7 @@ impl<'a> LoweringState<'a> {
                 if parallel_copy::reverse_emit_is_safe(&copies) {
                     indices.reverse();
                 } else if !parallel_copy::forward_emit_is_safe(&copies) {
-                    bail!("Pack: neither reverse nor forward emit is overlap-safe");
+                    return Err(LoweringError::NotOverlapSafe { op: "Pack" });
                 }
                 for i in indices {
                     let (offset, size, align) = field_layouts[i];
@@ -1588,11 +1584,11 @@ impl<'a> LoweringState<'a> {
                 let struct_ty = self.concrete_ty(*struct_ty)?;
                 let field_layouts = self.struct_field_layouts(struct_ty, "Unpack")?;
                 if field_layouts.len() != dsts.len() {
-                    bail!(
-                        "Unpack: dst count {} does not match struct field count {}",
-                        dsts.len(),
-                        field_layouts.len()
-                    );
+                    return Err(LoweringError::FieldCountMismatch {
+                        op: "Unpack",
+                        provided: dsts.len(),
+                        expected: field_layouts.len(),
+                    });
                 }
                 let src_info = self.slot(*src)?;
                 // Resolve all dst offsets first so the overlap-safety check can
@@ -1614,7 +1610,7 @@ impl<'a> LoweringState<'a> {
                 if parallel_copy::reverse_emit_is_safe(&copies) {
                     indices.reverse();
                 } else if !parallel_copy::forward_emit_is_safe(&copies) {
-                    bail!("Unpack: neither reverse nor forward emit is overlap-safe");
+                    return Err(LoweringError::NotOverlapSafe { op: "Unpack" });
                 }
                 for i in indices {
                     let (offset, size, align) = field_layouts[i];
@@ -1652,7 +1648,7 @@ impl<'a> LoweringState<'a> {
                 // The destacker pushes the closure as the last operand;
                 // everything before it is a provided (non-captured) argument.
                 let Some((closure_slot, provided)) = all_args.split_last() else {
-                    bail!("CallClosure has no closure operand");
+                    return Err(LoweringError::CallClosureNoOperand);
                 };
                 let closure_src = self.slot(*closure_slot)?.offset;
                 let provided_args = self.slots_to_sized_slots(provided)?;
@@ -1703,7 +1699,7 @@ impl<'a> LoweringState<'a> {
                 let box_ptr = self
                     .ctx
                     .resource_box_slot
-                    .ok_or_else(|| anyhow::anyhow!("MoveFrom: box-pointer slot not reserved"))?;
+                    .ok_or(LoweringError::BoxPtrSlotNotReserved { op: "MoveFrom" })?;
                 let addr_info = self.slot(*addr)?;
                 let dst_info = self.def_slot(*dst)?;
                 self.emit(MicroOp::MoveFrom {
@@ -1734,16 +1730,14 @@ impl<'a> LoweringState<'a> {
                 // `frame_layout` being a whole-function root set; it would break
                 // if safe points became per-PC / liveness-based.
                 let concrete_ty = self.concrete_ty(*ty)?;
-                let descriptor_id = self.ctx.descriptor_id(concrete_ty).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "MoveTo: no descriptor published for the resource type \
-                         (its layout may be unresolved)"
-                    )
-                })?;
+                let descriptor_id = self
+                    .ctx
+                    .descriptor_id(concrete_ty)
+                    .ok_or(LoweringError::ResourceTypeNoDescriptor { op: "MoveTo" })?;
                 let box_ptr = self
                     .ctx
                     .resource_box_slot
-                    .ok_or_else(|| anyhow::anyhow!("MoveTo: box-pointer slot not reserved"))?;
+                    .ok_or(LoweringError::BoxPtrSlotNotReserved { op: "MoveTo" })?;
                 let signer_info = self.slot(*signer)?;
                 let val_info = self.slot(*val)?;
                 self.emit(MicroOp::HeapNew {
@@ -1776,17 +1770,19 @@ impl<'a> LoweringState<'a> {
                 let ctx = self.ctx;
                 let layout = ctx
                     .enum_layout(enum_ty)
-                    .ok_or_else(|| anyhow::anyhow!("PackVariant: no derived layout for enum"))?;
-                let variant_fields =
-                    layout.variants.get(*variant_ord as usize).ok_or_else(|| {
-                        anyhow::anyhow!("PackVariant: variant ordinal {} out of range", variant_ord)
-                    })?;
+                    .ok_or(LoweringError::EnumLayoutNotDerived { op: "PackVariant" })?;
+                let variant_fields = layout.variants.get(*variant_ord as usize).ok_or(
+                    LoweringError::VariantOrdinalOutOfRange {
+                        op: "PackVariant",
+                        ordinal: *variant_ord as usize,
+                    },
+                )?;
                 if variant_fields.len() != args.len() {
-                    bail!(
-                        "PackVariant: arg count {} does not match variant field count {}",
-                        args.len(),
-                        variant_fields.len()
-                    );
+                    return Err(LoweringError::FieldCountMismatch {
+                        op: "PackVariant",
+                        provided: args.len(),
+                        expected: variant_fields.len(),
+                    });
                 }
                 let descriptor_id = layout.descriptor_id;
                 // GC-safe ordering: `def_slot` only stages the dst's Xfer bind,
@@ -1814,11 +1810,9 @@ impl<'a> LoweringState<'a> {
                             ranges_overlap(dst_off.0, ENUM_PTR_SIZE, arg.offset.0, field.size)
                         });
                 let pack_ptr = if aliases_arg {
-                    self.ctx.enum_ptr_scratch.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "PackVariant: dst aliases an arg but no enum-pointer scratch"
-                        )
-                    })?
+                    self.ctx
+                        .enum_ptr_scratch
+                        .ok_or(LoweringError::EnumPtrScratchMissing { op: "PackVariant" })?
                 } else {
                     dst_off
                 };
@@ -1844,22 +1838,23 @@ impl<'a> LoweringState<'a> {
             Instr::UnpackVariant(dsts, enum_ty, variant_ord, src) => {
                 let enum_ty = self.concrete_ty(*enum_ty)?;
                 let ctx = self.ctx;
-                let layout = ctx
-                    .enum_layout(enum_ty)
-                    .ok_or_else(|| anyhow::anyhow!("UnpackVariant: no derived layout for enum"))?;
-                let variant_fields =
-                    layout.variants.get(*variant_ord as usize).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "UnpackVariant: variant ordinal {} out of range",
-                            variant_ord
-                        )
-                    })?;
+                let layout =
+                    ctx.enum_layout(enum_ty)
+                        .ok_or(LoweringError::EnumLayoutNotDerived {
+                            op: "UnpackVariant",
+                        })?;
+                let variant_fields = layout.variants.get(*variant_ord as usize).ok_or(
+                    LoweringError::VariantOrdinalOutOfRange {
+                        op: "UnpackVariant",
+                        ordinal: *variant_ord as usize,
+                    },
+                )?;
                 if variant_fields.len() != dsts.len() {
-                    bail!(
-                        "UnpackVariant: dst count {} does not match variant field count {}",
-                        dsts.len(),
-                        variant_fields.len()
-                    );
+                    return Err(LoweringError::FieldCountMismatch {
+                        op: "UnpackVariant",
+                        provided: dsts.len(),
+                        expected: variant_fields.len(),
+                    });
                 }
                 let src_off = self.slot(*src)?.offset;
                 // Resolve all dst slots up front (mirrors struct `Unpack`) so we
@@ -1884,11 +1879,12 @@ impl<'a> LoweringState<'a> {
                             ranges_overlap(src_off.0, ENUM_PTR_SIZE, dst_off.0, field.size)
                         });
                 let load_ptr = if aliases_dst {
-                    let scratch = self.ctx.enum_ptr_scratch.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "UnpackVariant: dst aliases src but no enum-pointer scratch"
-                        )
-                    })?;
+                    let scratch =
+                        self.ctx
+                            .enum_ptr_scratch
+                            .ok_or(LoweringError::EnumPtrScratchMissing {
+                                op: "UnpackVariant",
+                            })?;
                     self.emit(MicroOp::Move8 {
                         dst: scratch,
                         src: src_off,
@@ -1958,9 +1954,11 @@ impl<'a> LoweringState<'a> {
                         access.field_size,
                     ))?,
                     None => {
-                        let scratch = self.ctx.variant_field_scratch.ok_or_else(|| {
-                            anyhow::anyhow!("ReadVariantField: no scratch slot reserved")
-                        })?;
+                        let scratch = self.ctx.variant_field_scratch.ok_or(
+                            LoweringError::VariantFieldScratchMissing {
+                                op: "ReadVariantField",
+                            },
+                        )?;
                         self.emit_variant_field_borrow(&access, src_off, scratch)?;
                         self.emit(MicroOp::ReadRef {
                             dst: dst_off,
@@ -1985,9 +1983,11 @@ impl<'a> LoweringState<'a> {
                         access.field_size,
                     ))?,
                     None => {
-                        let scratch = self.ctx.variant_field_scratch.ok_or_else(|| {
-                            anyhow::anyhow!("WriteVariantField: no scratch slot reserved")
-                        })?;
+                        let scratch = self.ctx.variant_field_scratch.ok_or(
+                            LoweringError::VariantFieldScratchMissing {
+                                op: "WriteVariantField",
+                            },
+                        )?;
                         self.emit_variant_field_borrow(&access, ref_off, scratch)?;
                         self.emit(MicroOp::WriteRef {
                             ref_ptr: scratch,
@@ -2055,7 +2055,7 @@ impl<'a> LoweringState<'a> {
 
     /// Derive a [`NativeABI`] for a native call site from its arg/ret
     /// slots.
-    fn derive_native_abi(&self, cs: &CallSiteInfo) -> Result<NativeABI> {
+    fn derive_native_abi(&self, cs: &CallSiteInfo) -> LoweringResult<NativeABI> {
         let callee_base = self.ctx.frame_data_size + FRAME_METADATA_SIZE as u32;
         let to_slot = |s: &TypedSlot| FrameSlot {
             offset: s.slot.offset.0 - callee_base,
@@ -2074,12 +2074,13 @@ impl<'a> LoweringState<'a> {
         }
         heap_ptr_offsets.sort_by_key(|o| o.0);
         heap_ptr_offsets.dedup();
-        Ok(NativeABI::new(
+        NativeABI::new(
             args,
             returns,
             heap_ptr_offsets,
             cs.required_descriptors.clone(),
-        )?)
+        )
+        .map_err(LoweringError::NativeAbi)
     }
 
     /// Lower one call. Args are written by reverse iteration over the
@@ -2095,7 +2096,12 @@ impl<'a> LoweringState<'a> {
     /// live ret slot; and (3) the single-use invariant bounds the
     /// bound value's last read to at or before the next call, so the
     /// callee_base region is free to be reused past that point.
-    fn lower_call(&mut self, _func_ir: &FunctionIR, args: &[Slot], rets: &[Slot]) -> Result<()> {
+    fn lower_call(
+        &mut self,
+        _func_ir: &FunctionIR,
+        args: &[Slot],
+        rets: &[Slot],
+    ) -> LoweringResult<()> {
         let cs = &self.ctx.call_sites[self.call_site_cursor];
 
         // Debug: assert the byte-overlap precondition that makes
@@ -2183,7 +2189,7 @@ impl<'a> LoweringState<'a> {
     /// An unconditional jump stores its target block's cost; a conditional jump
     /// stores both the taken block's cost (`gas_taken`) and the fallthrough
     /// block's cost (`gas_fallthrough`).
-    fn fixup_branches(&mut self) -> Result<()> {
+    fn fixup_branches(&mut self) -> LoweringResult<()> {
         for fixup in &self.branch_fixups {
             let idx = fixup.idx;
             // Extract the encoded label from the op, resolve it, then patch.
@@ -2202,7 +2208,10 @@ impl<'a> LoweringState<'a> {
                 MicroOp::JumpIntCmp(op) => op.target.0,
                 MicroOp::JumpValueCmp(op) => op.target.0,
                 MicroOp::JumpValueRefCmp(op) => op.target.0,
-                other => bail!("unexpected non-branch op at fixup index {}: {}", idx, other),
+                other => {
+                    let _ = other;
+                    return Err(LoweringError::UnexpectedNonBranchOpAtFixup { idx });
+                },
             };
             let label = decode_label(encoded);
             let resolved = self.resolve_label(label)?;
@@ -2279,43 +2288,42 @@ impl<'a> LoweringState<'a> {
                 } => {
                     target.0 = resolved;
                     *gas_taken = taken;
-                    *gas_fallthrough = fallthrough.ok_or_else(|| {
-                        anyhow::anyhow!("conditional branch at {} has no fallthrough label", idx)
-                    })?;
+                    *gas_fallthrough =
+                        fallthrough.ok_or(LoweringError::ConditionalBranchNoFallthrough { idx })?;
                 },
                 MicroOp::JumpIntCmp(op) => {
                     op.target.0 = resolved;
                     op.gas_taken = taken;
-                    op.gas_fallthrough = fallthrough.ok_or_else(|| {
-                        anyhow::anyhow!("conditional branch at {} has no fallthrough label", idx)
-                    })?;
+                    op.gas_fallthrough =
+                        fallthrough.ok_or(LoweringError::ConditionalBranchNoFallthrough { idx })?;
                 },
                 MicroOp::JumpValueCmp(op) => {
                     op.target.0 = resolved;
                     op.gas_taken = taken;
-                    op.gas_fallthrough = fallthrough.ok_or_else(|| {
-                        anyhow::anyhow!("conditional branch at {} has no fallthrough label", idx)
-                    })?;
+                    op.gas_fallthrough =
+                        fallthrough.ok_or(LoweringError::ConditionalBranchNoFallthrough { idx })?;
                 },
                 MicroOp::JumpValueRefCmp(op) => {
                     op.target.0 = resolved;
                     op.gas_taken = taken;
-                    op.gas_fallthrough = fallthrough.ok_or_else(|| {
-                        anyhow::anyhow!("conditional branch at {} has no fallthrough label", idx)
-                    })?;
+                    op.gas_fallthrough =
+                        fallthrough.ok_or(LoweringError::ConditionalBranchNoFallthrough { idx })?;
                 },
-                other => bail!("unexpected non-branch op at fixup index {}: {}", idx, other),
+                other => {
+                    let _ = other;
+                    return Err(LoweringError::UnexpectedNonBranchOpAtFixup { idx });
+                },
             }
         }
         Ok(())
     }
 
-    fn resolve_label(&self, label: u16) -> Result<u32> {
+    fn resolve_label(&self, label: u16) -> LoweringResult<u32> {
         self.label_map
             .get(label as usize)
             .copied()
             .flatten()
-            .ok_or_else(|| anyhow::anyhow!("unresolved label L{}", label))
+            .ok_or(LoweringError::UnresolvedLabel { label })
     }
 }
 
@@ -2330,7 +2338,7 @@ fn decode_label(encoded: u32) -> u16 {
     (encoded & 0x7FFF_FFFF) as u16
 }
 
-fn imm_to_u64(imm: &ImmValue) -> Result<u64> {
+fn imm_to_u64(imm: &ImmValue) -> LoweringResult<u64> {
     Ok(match imm {
         ImmValue::Bool(true) => 1,
         ImmValue::Bool(false) => 0,
@@ -2343,24 +2351,27 @@ fn imm_to_u64(imm: &ImmValue) -> Result<u64> {
         ImmValue::I32(v) => *v as u64,
         ImmValue::I64(v) => *v as u64,
         ImmValue::U128(_) | ImmValue::U256(_) | ImmValue::I128(_) | ImmValue::I256(_) => {
-            bail!("u64 fast path received a wide imm — ill-typed IR")
+            return Err(LoweringError::U64FastPathWideImm)
         },
     })
 }
 
 /// Extract a u8 shift amount. The rhs of a Move `Shl`/`Shr` is always u8
 /// by language spec; anything else is an upstream invariant violation.
-fn shift_imm_u8(imm: &ImmValue) -> Result<u8> {
+fn shift_imm_u8(imm: &ImmValue) -> LoweringResult<u8> {
     match imm {
         ImmValue::U8(v) => Ok(*v),
-        other => bail!("shift immediate must be u8, got {:?}", other),
+        other => {
+            let _ = other;
+            Err(LoweringError::ShiftImmNotU8)
+        },
     }
 }
 
 /// Build an [`IntOperand`] slot arm from a Move integer type and frame
 /// offset.
-fn int_operand_from_slot(ty: &Type, off: FrameOffset) -> Result<IntOperand> {
-    let int_ty = IntTy::from_type(ty).ok_or_else(|| anyhow::anyhow!("expected an integer type"))?;
+fn int_operand_from_slot(ty: &Type, off: FrameOffset) -> LoweringResult<IntOperand> {
+    let int_ty = IntTy::from_type(ty).ok_or(LoweringError::ExpectedIntegerType)?;
     Ok(IntOperand::slot(int_ty, off))
 }
 
@@ -2374,7 +2385,7 @@ enum EqKind {
 }
 
 /// Classify how an equality operand of the given type is lowered.
-fn eq_kind(ty: &Type) -> Result<EqKind> {
+fn eq_kind(ty: &Type) -> LoweringResult<EqKind> {
     Ok(match ty {
         Type::Bool
         | Type::Address
@@ -2395,19 +2406,19 @@ fn eq_kind(ty: &Type) -> Result<EqKind> {
         Type::Vector { .. } | Type::Nominal { .. } => EqKind::NonIntValue,
         Type::ImmutRef { .. } | Type::MutRef { .. } => EqKind::Ref,
         Type::Function { .. } | Type::TypeParam { .. } => {
-            bail!("equality is not supported for this operand type")
+            return Err(LoweringError::EqualityUnsupportedType)
         },
     })
 }
 
 /// Map an equality [`CmpKind`] to the `negate` flag of the structural-equality
 /// ops (`false` for `Eq`, `true` for `Neq`).
-fn eq_negate(op: CmpKind) -> Result<bool> {
+fn eq_negate(op: CmpKind) -> LoweringResult<bool> {
     match op {
         CmpKind::Eq => Ok(false),
         CmpKind::Neq => Ok(true),
         CmpKind::Lt | CmpKind::Le | CmpKind::Gt | CmpKind::Ge => {
-            bail!("ordering comparison on a non-scalar operand is ill-typed")
+            Err(LoweringError::OrderingOnNonScalar)
         },
     }
 }
@@ -2417,7 +2428,7 @@ fn eq_negate(op: CmpKind) -> Result<bool> {
 /// bytes) are flat values with only `==`/`!=` (no ordering), and comparing
 /// their bit patterns is exactly value equality, so they reuse the integer
 /// compare ops at the matching width.
-fn cmp_operand_from_slot(ty: &Type, off: FrameOffset) -> Result<IntOperand> {
+fn cmp_operand_from_slot(ty: &Type, off: FrameOffset) -> LoweringResult<IntOperand> {
     match ty {
         Type::Bool => Ok(IntOperand::SlotU8(off)),
         // A signer holds an address, so it compares as a 32-byte value.
@@ -2439,13 +2450,13 @@ fn cmp_operand_from_slot(ty: &Type, off: FrameOffset) -> Result<IntOperand> {
         | Type::Vector { .. }
         | Type::Nominal { .. }
         | Type::Function { .. }
-        | Type::TypeParam { .. } => bail!("operand type has no comparison lowering"),
+        | Type::TypeParam { .. } => Err(LoweringError::ComparisonNoLowering),
     }
 }
 
 /// Immediate counterpart of [`cmp_operand_from_slot`]: a bool immediate
 /// compares as the 1-byte value `0`/`1`.
-fn cmp_operand_from_imm(imm: &ImmValue) -> Result<IntOperand> {
+fn cmp_operand_from_imm(imm: &ImmValue) -> LoweringResult<IntOperand> {
     match imm {
         ImmValue::Bool(b) => Ok(IntOperand::ImmU8(*b as u8)),
         ImmValue::U8(_)
@@ -2466,7 +2477,7 @@ fn cmp_operand_from_imm(imm: &ImmValue) -> Result<IntOperand> {
 /// Build an [`IntOperand`] imm arm matching `imm`. The destacker emits an
 /// `ImmValue` variant whose type matches the typed slot's `Ld*` source,
 /// so a 1:1 map is enough here.
-fn int_operand_from_imm(imm: &ImmValue) -> Result<IntOperand> {
+fn int_operand_from_imm(imm: &ImmValue) -> LoweringResult<IntOperand> {
     Ok(match imm {
         ImmValue::U8(v) => IntOperand::ImmU8(*v),
         ImmValue::U16(v) => IntOperand::ImmU16(*v),
@@ -2480,6 +2491,6 @@ fn int_operand_from_imm(imm: &ImmValue) -> Result<IntOperand> {
         ImmValue::I64(v) => IntOperand::ImmI64(*v),
         ImmValue::I128(v) => IntOperand::ImmI128(v.clone()),
         ImmValue::I256(v) => IntOperand::ImmI256(v.clone()),
-        ImmValue::Bool(_) => bail!("bool ImmValue cannot be an integer operand"),
+        ImmValue::Bool(_) => return Err(LoweringError::BoolImmNotInteger),
     })
 }
